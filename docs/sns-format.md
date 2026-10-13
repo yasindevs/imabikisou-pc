@@ -64,7 +64,12 @@ Toutes les instructions ont la forme `[op][u8 taille][données]`, sauf :
 | `18` | `18` | début de furigana : les morceaux `01` suivants sont la lecture… |
 | `19` | `19` | …fin de la lecture ; le morceau `01` suivant est le texte de base |
 
-Opcodes identifiés (le reste est nommé `op_XX` dans le désassemblage) :
+> **La référence complète des 165 opcodes, tirée du code de l'interpréteur de l'EBOOT, est dans
+> [opcodes.md](opcodes.md).** Le tableau ci-dessous est la première analyse, faite uniquement à partir des
+> données ; il est conservé pour l'historique. Une correction importante : l'octet qui précède un nom de label
+> n'est pas un « flags » mais le **numéro du fichier de script** cible.
+
+Opcodes identifiés à partir des données seules :
 
 | Op | Nb | Hypothèse |
 |---|---|---|
@@ -97,8 +102,8 @@ Une ligne est une suite de morceaux de texte et de codes intégrés, qui se term
 
 ## À faire
 
-- Sémantique des opcodes restants (graphismes, sons, choix, flags), à confirmer dans l'EBOOT (interpréteur
-  `ScriptTask`) et en jeu.
+- Sémantique des opcodes restants : voir [opcodes.md](opcodes.md).
+- Exporter aussi les titres de scène (`98`, en UTF-8 dans la charge utile) pour la traduction.
 - Table de paramètres à `0x20`, champs `0x14`–`0x1B`.
 - Formats de `st.flw` (organigramme) et `st.ara`.
 

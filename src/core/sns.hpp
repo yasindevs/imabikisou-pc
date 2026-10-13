@@ -2,6 +2,7 @@
 
 #include "core/scr.hpp"
 
+#include <optional>
 #include <string_view>
 
 namespace imbk::sns {
@@ -33,15 +34,25 @@ constexpr std::uint8_t Page = 0x1B;
 constexpr std::uint8_t NarrationBegin = 0x1F;
 constexpr std::uint8_t NarrationEnd = 0x21;
 constexpr std::uint8_t Name = 0x37; // u8 character index: inserts that character's name
-constexpr std::uint8_t Branch = 0x49; // u8 flags, label name (conditional jump; e.g. the two exits of the prologue check)
-constexpr std::uint8_t Jump = 0x4A;  // u8 flags, label name (517 uses; e.g. the boot script's jump to the prologue)
+constexpr std::uint8_t Branch = 0x49; // u8 file, label name (conditional jump; e.g. the two exits of the prologue check)
+constexpr std::uint8_t Jump = 0x4A;   // u8 file, label name
 constexpr std::uint8_t Label = 0x4D;
-constexpr std::uint8_t MessageBegin = 0x7E; // payload ends with the message id, e.g. "__1_17"
+constexpr std::uint8_t MessageBegin = 0x7E; // voice/params, then u8 file + message id label, e.g. "__1_17"
 constexpr std::uint8_t MessageEnd = 0x7F;
 constexpr std::uint8_t Return = 0x9C; // last instruction of every script file (followed by zero padding)
 } // namespace op
 
 std::string_view mnemonic(std::uint8_t op); // "op_XX" when the meaning is still unknown
+
+// Opcodes whose payload holds "[u8 script file index][NUL-terminated label name]": offset of that pair in
+// the payload (verified on every instruction of BLJM60042). 7E's label is the message id.
+std::optional<std::size_t> labelRefOffset(std::uint8_t op);
+constexpr std::size_t kTrailingLabelRef = static_cast<std::size_t>(-1); // after the condition list (4E)
+
+struct LabelRef {
+    std::uint8_t file = 0;
+    std::string name;
+};
 
 struct Instruction {
     std::uint32_t offset = 0;    // relative to the file's code base
@@ -85,6 +96,9 @@ public:
     ByteSpan args(const Instruction& i) const { return ByteSpan(data_).subspan(i.argOffset, i.argSize); }
     std::string labelName(const Instruction& i) const; // for op::Label
     std::string messageId(const Instruction& i) const; // for op::MessageBegin
+    std::optional<LabelRef> labelRef(const Instruction& i) const;
+    // Name of the resource an instruction refers to (picture, movie or BGM), if any.
+    std::optional<std::string> resourceName(const Instruction& i) const;
 
     std::vector<Line> lines() const;
     std::vector<std::string> validate() const;

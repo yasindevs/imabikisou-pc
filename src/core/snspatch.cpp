@@ -132,10 +132,14 @@ Bytes applyTranslations(const Script& script, const std::map<std::string, std::s
         // u8 flags, label name) either to S00A_0000_0000 (prologue skipped) or to the prologue. Only that
         // branch is retargeted, so the game still goes through its own set-up.
         bool known = false;
+        std::uint8_t targetFile = 0; // label references are "[u8 script file index][name]"
         std::size_t retargeted = 0;
-        for (const auto& f : script.files)
-            for (const auto& in : f.code)
-                if (in.opcode == op::Label && script.labelName(in) == options.startLabel) known = true;
+        for (std::size_t fi = 0; fi < script.files.size(); ++fi)
+            for (const auto& in : script.files[fi].code)
+                if (in.opcode == op::Label && script.labelName(in) == options.startLabel) {
+                    known = true;
+                    targetFile = static_cast<std::uint8_t>(fi);
+                }
         if (!known) report.errors.push_back("--start: unknown label " + options.startLabel);
         if (options.startLabel.size() > 253) report.errors.push_back("--start: label too long");
         for (std::size_t fi = 0; fi < script.files.size() && known; ++fi) {
@@ -143,7 +147,7 @@ Bytes applyTranslations(const Script& script, const std::map<std::string, std::s
             for (std::size_t i = 0; i < f.code.size(); ++i) {
                 const auto& in = f.code[i];
                 if (in.opcode != op::Branch || script.labelName(in) != kPrologueLabel) continue;
-                Bytes branch{op::Branch, static_cast<std::uint8_t>(options.startLabel.size() + 2), script.args(in)[0]};
+                Bytes branch{op::Branch, static_cast<std::uint8_t>(options.startLabel.size() + 2), targetFile};
                 branch.insert(branch.end(), options.startLabel.begin(), options.startLabel.end());
                 branch.push_back(0);
                 plan[fi][i] = {i + 1, std::move(branch)};

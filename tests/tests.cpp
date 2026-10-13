@@ -175,7 +175,8 @@ void testSns() {
     CHECK(enc == plain);
 }
 
-// Builds a decrypted st.sns container with one script file, one label and resource tables.
+// Builds a decrypted st.sns container with one script file (index 0), two labels and resource tables.
+// Label references are "[u8 file index][name]": the scene label L1 and the message id m1 (a local label).
 Bytes makeSnsContainer(bool badTarget) {
     Bytes b;
     appendStr(b, std::string_view("CSD-CSCNV:01.68\0", 16));
@@ -187,19 +188,23 @@ Bytes makeSnsContainer(bool badTarget) {
     putStr(b, file, "test.xml");
     const std::size_t table = file + 0x30;
     const std::size_t entry = table + 257 * 4;
-    const std::size_t code = entry + 12; // 8-byte entry header + "L1\0" padded to 4
+    const std::size_t code = entry + 24; // two 8-byte entry headers + names padded to 4
     put32(b, table + 3 * 4, static_cast<std::uint32_t>(entry - file));
     put32(b, table + 256 * 4, static_cast<std::uint32_t>(code - file));
-    put16(b, entry, 0);
+    put16(b, entry, 12); // next entry in the same bucket
     put16(b, entry + 2, scr::kSceneLabelTag);
     put32(b, entry + 4, badTarget ? 5 : 6); // just after the label instruction below
     putStr(b, entry + 8, std::string_view("L1\0\0", 4));
+    put16(b, entry + 12, 0);
+    put16(b, entry + 14, scr::kSceneLabelTag);
+    put32(b, entry + 16, 6); // the message instruction
+    putStr(b, entry + 20, std::string_view("m1\0\0", 4));
     b.resize(code);
 
-    append(b, {0x4D, 0x04, 0x01, 'L', '1', 0x00});         // label L1
-    append(b, {0x7E, 24});                                 // message: 18 bytes of params, u16, u8, id "m1"
+    append(b, {0x4D, 0x04, 0x00, 'L', '1', 0x00});         // label L1 (file 0)
+    append(b, {0x7E, 24});                                 // message: 20 bytes of params, file 0, id "m1"
     b.insert(b.end(), 20, 0);
-    append(b, {0x01, 'm', '1', 0x00});
+    append(b, {0x00, 'm', '1', 0x00});
     append(b, {0x01, 0xE3, 0x81, 0x82, 0x02});             // text "あ"
     append(b, {0x37, 0x01, 0x00});                         // name 0
     append(b, {0x17, 0x00, 0x7F, 0x00});                   // wait, message end

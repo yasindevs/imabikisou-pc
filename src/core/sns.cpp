@@ -55,24 +55,45 @@ std::string hexOf(ByteSpan a) {
 } // namespace
 
 std::string_view mnemonic(std::uint8_t op) {
-    // Names are working hypotheses, see docs/sns-format.md.
+    // From the EBOOT's handler table (0x100AE740) and its debug strings; see docs/opcodes.md for the evidence
+    // and confidence of each name.
     switch (op) {
     case op::Text: return "text";
+    case op::TextEnd: return "text_end";
+    case 0x12: return "text_pos";
     case op::Wait: return "wait";
     case op::RubyBegin: return "ruby";
     case op::RubyEnd: return "ruby_end";
     case op::Newline: return "newline";
     case op::Page: return "page";
+    case 0x1E: return "scene_box";
     case op::NarrationBegin: return "narration";
     case op::NarrationEnd: return "narration_end";
-    case op::Name: return "name";
     case 0x29: return "delay";
+    case op::Name: return "name";
+    case 0x3C: return "sys_sound";
+    case 0x3D: return "movie_pause";
+    case 0x3E: return "movie_resume";
+    case 0x40: return "picture";
     case op::Branch: return "branch";
     case op::Jump: return "jump";
     case op::Label: return "label";
+    case 0x4E: return "if_flag";
+    case 0x51: return "call";
+    case 0x52: return "ret";
+    case 0x59: return "transition_set";
+    case 0x5A: return "transition_wait";
+    case 0x5B: return "transition_start";
+    case 0x60: return "picture_clear";
     case op::MessageBegin: return "message";
     case op::MessageEnd: return "message_end";
-    case op::Return: return "return";
+    case 0x88: return "bgm_play";
+    case 0x8E: return "movie";
+    case 0x8F: return "movie_stop";
+    case 0x96: return "scene_start";
+    case 0x97: return "scene_end";
+    case 0x98: return "scene_title";
+    case op::Return: return "end";
     }
     static const auto names = [] {
         std::array<std::array<char, 6>, 256> n{};
@@ -149,8 +170,52 @@ Script Script::parse(Bytes decrypted) {
 }
 
 std::string Script::labelName(const Instruction& i) const {
-    const auto a = args(i); // u8 flags, NUL-terminated name
+    const auto a = args(i); // u8 script file index, NUL-terminated name
     return a.size() < 2 ? std::string() : cstr(a, 1, a.size() - 1);
+}
+
+std::optional<std::size_t> labelRefOffset(std::uint8_t op) {
+    switch (op) {
+    case 0x49: case 0x4A: case 0x4D: case 0x50: case 0x51: case 0x91: case 0x92: case 0x93: return 0;
+    case 0x62: case 0x6A: return 3;
+    case 0x4B: case 0x4C: return 5;
+    case op::MessageBegin: return 20;
+    case 0x4E: return kTrailingLabelRef; // one condition, or FF FD + several: the label always comes last
+    }
+    return std::nullopt;
+}
+
+std::optional<LabelRef> Script::labelRef(const Instruction& i) const {
+    auto at = labelRefOffset(i.opcode);
+    const auto a = args(i);
+    if (at == kTrailingLabelRef) {
+        // Single condition: u16 flag, u8 comparison, u8, u8 value, then the label.
+        // Compound: s16 -n (FF FE = 2 ... FF FB = 5), then n 6-byte conditions (4E, u16 flag, u8, u8, u8)
+        // joined by n-1 connector bytes, then the label.
+        at = 5;
+        if (a.size() > 2 && a[0] == 0xFF) {
+            const std::size_t n = 0x10000 - be16(a, 0);
+            at = 2 + n * 6 + (n - 1);
+        }
+    }
+    if (!at || *at + 2 > a.size()) return std::nullopt;
+    LabelRef r;
+    r.file = a[*at];
+    r.name = cstr(a, *at + 1, a.size() - *at - 1);
+    return r;
+}
+
+std::optional<std::string> Script::resourceName(const Instruction& i) const {
+    // u16 resource index at the start of the payload: pictures (40), movies (8E), BGM (88; 0x4000 = mode bit).
+    const std::vector<std::string>* table = i.opcode == 0x40   ? &resources.pictures
+                                            : i.opcode == 0x8E ? &resources.movies
+                                            : i.opcode == 0x88 ? &resources.bgm
+                                                               : nullptr;
+    const auto a = args(i);
+    if (!table || a.size() < 2) return std::nullopt;
+    const std::size_t index = be16(a, 0) & (i.opcode == 0x40 ? 0xFFFF : 0x3FFF);
+    if (index >= table->size()) return std::nullopt;
+    return (*table)[index];
 }
 
 std::string Script::messageId(const Instruction& i) const {
@@ -263,6 +328,20 @@ std::vector<std::string> Script::validate() const {
                 problems.push_back(f.name + ": label " + l.name + " does not point at an instruction");
         }
         if (f.code.empty() || f.code.back().opcode != op::Return) problems.push_back(f.name + ": does not end with op 9C");
+        for (const auto& in : f.code) {
+            if (!labelRefOffset(in.opcode)) continue;
+            const auto ref = labelRef(in);
+            bool found = false;
+            if (ref && ref->file < files.size())
+                for (const auto& l : files[ref->file].labels)
+                    if (l.name == ref->name) {
+                        found = true;
+                        break;
+                    }
+            if (!found)
+                problems.push_back(f.name + ": " + std::string(mnemonic(in.opcode)) + " refers to a missing label " +
+                                   (ref ? std::to_string(ref->file) + ":" + ref->name : std::string("?")));
+        }
         for (const auto& [name, _] : declared)
             if (!globalLabels.insert(name).second) problems.push_back("label " + name + " declared in several files");
     }

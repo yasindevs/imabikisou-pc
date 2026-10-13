@@ -296,11 +296,21 @@ int cmdSnsDisasm(const Game& game, const char* outPath) {
             const auto a = s.args(in);
             if (in.opcode == sns::op::Label) out << "\n" << s.labelName(in) << ":\n";
             std::string m(sns::mnemonic(in.opcode));
-            m.resize(std::max<std::size_t>(m.size(), 13), ' ');
+            m.resize(std::max<std::size_t>(m.size(), 16), ' ');
             out << hex(in.offset, 6) << "  " << hex(in.opcode, 2) << " " << m;
-            if (in.opcode == sns::op::Text) out << " \"" << std::string_view(reinterpret_cast<const char*>(a.data()), a.size()) << "\"";
-            else if (in.opcode == sns::op::MessageBegin) out << " id=" << s.messageId(in) << "  [" << hexBytes(a) << "]";
-            else if (!a.empty()) out << " [" << a.size() << "] " << hexBytes(a) << "  | " << printable(a);
+            if (in.opcode == sns::op::Text) {
+                out << " \"" << std::string_view(reinterpret_cast<const char*>(a.data()), a.size()) << "\"";
+            } else if (!a.empty()) {
+                out << " [" << a.size() << "] " << hexBytes(a);
+                if (const auto ref = s.labelRef(in); ref && in.opcode != sns::op::Label) {
+                    const auto target = ref->file < s.files.size() ? s.files[ref->file].name : "?";
+                    out << "  -> " << target << ":" << ref->name;
+                } else if (const auto res = s.resourceName(in)) {
+                    out << "  -> " << *res;
+                } else if (in.opcode != sns::op::Label) {
+                    out << "  | " << printable(a);
+                }
+            }
             out << "\n";
         }
     }
