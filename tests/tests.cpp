@@ -7,6 +7,7 @@
 #include "core/sn4.hpp"
 #include "core/sns.hpp"
 #include "core/snspatch.hpp"
+#include "engine/image.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -323,11 +324,30 @@ void testAfsRebuild() {
     std::filesystem::remove(path);
 }
 
+void testDds() {
+    Bytes b;
+    putStr(b, 0, "DDS ");
+    put32(b, 12, 4);  // height
+    put32(b, 16, 4);  // width
+    put32(b, 80, 4);  // FourCC
+    putStr(b, 84, "DXT1");
+    b.resize(128);
+    append(b, {0x00, 0xF8, 0x1F, 0x00}); // c0 = red (565), c1 = blue
+    append(b, {0x00, 0x00, 0x00, 0x55}); // rows 0-2 index 0 (red), row 3 index 1 (blue)
+    const auto img = engine::decodeDds(b);
+    CHECK(img.width == 4 && img.height == 4);
+    CHECK(img.pixels[0] == 0xFFFF0000u);
+    CHECK(img.pixels[15] == 0xFF0000FFu);
+
+    const auto half = engine::resize(img, 2, 2);
+    CHECK(half.width == 2 && half.pixels.size() == 4);
+}
+
 } // namespace
 
 int main() {
     const std::pair<const char*, std::function<void()>> tests[] = {
-        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns}, {"sns container", testSnsContainer}, {"encode line", testEncodeLine}, {"sns patch", testSnsPatch}, {"afs rebuild", testAfsRebuild},
+        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns}, {"sns container", testSnsContainer}, {"encode line", testEncodeLine}, {"sns patch", testSnsPatch}, {"afs rebuild", testAfsRebuild}, {"dds", testDds},
     };
     for (const auto& [name, fn] : tests) {
         try {
