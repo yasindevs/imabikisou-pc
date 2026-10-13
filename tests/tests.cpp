@@ -5,6 +5,7 @@
 #include "core/sfo.hpp"
 #include "core/sjis.hpp"
 #include "core/sn4.hpp"
+#include "core/sns.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -156,11 +157,28 @@ void testSn4() {
     CHECK(threw);
 }
 
+void testSns() {
+    Bytes plain;
+    appendStr(plain, std::string_view("CSD-CSCNV:01.68\0", 16));
+    append(plain, {0x00, 0x00, 0x55, 0xFF, 0xE3, 0x80, 0x8C});
+    for (int i = 0; i < 40; ++i) plain.push_back(static_cast<std::uint8_t>(i * 7));
+    CHECK(sns::version(plain) == "01.68");
+
+    auto enc = plain;
+    sns::encrypt(enc);
+    CHECK(enc != plain);
+    CHECK(std::equal(enc.begin(), enc.begin() + 16, plain.begin())); // header/key is stored in clear
+    CHECK(enc[16] == 'C' && enc[17] == 'S');                          // zeros encrypt to the key itself
+    CHECK(static_cast<std::uint8_t>(enc[18] - 'D') == 0x55); // byte 18 uses key[18 % 16] = 'D'
+    sns::decrypt(enc);
+    CHECK(enc == plain);
+}
+
 } // namespace
 
 int main() {
     const std::pair<const char*, std::function<void()>> tests[] = {
-        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4},
+        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns},
     };
     for (const auto& [name, fn] : tests) {
         try {

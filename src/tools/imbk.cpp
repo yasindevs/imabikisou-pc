@@ -7,6 +7,7 @@
 #include "core/sfo.hpp"
 #include "core/sjis.hpp"
 #include "core/sn4.hpp"
+#include "core/sns.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -27,6 +28,9 @@ constexpr std::string_view kTitleId = "BLJM60042";
 constexpr std::string_view kScriptArchive = "scriptchunk.afs";
 constexpr std::string_view kScriptEntry = "scenario.sn4";
 constexpr std::uint32_t kScenarioCrc = 0x3E472406; // scenario.sn4 of BLJM60042 v01.00
+constexpr std::string_view kResidentArchive = "residentchunk.afs";
+constexpr std::string_view kMainScriptEntry = "st.sns";
+constexpr std::uint32_t kMainScriptCrc = 0xC83EFAFA; // st.sns (encrypted) of BLJM60042 v01.00
 
 void usage() {
     std::cout <<
@@ -39,6 +43,7 @@ Usage:
   imbk extract <game> <out-dir> [archive...] Extract archive entries (all archives by default)
   imbk script disasm <game> [out.txt]        Disassemble scenario.sn4
   imbk script text   <game> [out.tsv]        Export dialogue lines as "<id>\t<text>"
+  imbk sns decrypt   <game> <out-file>       Write the decrypted main script (st.sns)
 
 <game> is your Imabikisou .iso, or a folder containing PS3_GAME/ (mounted disc or extracted copy).
 Output written to stdout or files is UTF-8.
@@ -64,6 +69,13 @@ sn4::Script loadScript(const Game& game) {
     const auto* e = afs.find(kScriptEntry);
     if (!e) throw std::runtime_error(std::string(kScriptEntry) + " not found in " + std::string(kScriptArchive));
     return sn4::Script::parse(afs.data(*e).readAll());
+}
+
+Bytes loadMainScriptRaw(const Game& game) {
+    const auto afs = Afs::parse(game.chunk(kResidentArchive));
+    const auto* e = afs.find(kMainScriptEntry);
+    if (!e) throw std::runtime_error(std::string(kMainScriptEntry) + " not found in " + std::string(kResidentArchive));
+    return afs.data(*e).readAll();
 }
 
 // Writes to the given file, or stdout when no path is given.
@@ -114,10 +126,17 @@ int cmdVerify(const Game& game) {
 
     const auto script = sn4::Script::parse(afs.data(*e).readAll());
     const auto problems = script.validate();
-    std::cout << "Script        : " << script.code.size() << " instructions, " << script.labels.size() << " labels, "
+    std::cout << "scenario.sn4  : " << script.code.size() << " instructions, " << script.labels.size() << " labels, "
               << script.lines().size() << " lines" << (problems.empty() ? "  OK" : "  INCONSISTENT") << "\n";
     for (const auto& p : problems) std::cout << "  - " << p << "\n";
     ok &= problems.empty();
+
+    const auto sns = loadMainScriptRaw(game);
+    const auto snsCrc = crc32(sns);
+    const bool snsOk = sns::isSns(sns) && snsCrc == kMainScriptCrc;
+    std::cout << "st.sns        : CSD-CSCNV " << (sns::isSns(sns) ? sns::version(sns) : "?") << ", CRC32 " << hex(snsCrc)
+              << (snsOk ? "  OK" : "  UNEXPECTED") << "\n";
+    ok &= snsOk;
 
     std::cout << (ok ? "\nThis copy is supported.\n" : "\nThis copy does not match the supported release.\n");
     return ok ? 0 : 1;
@@ -199,6 +218,17 @@ int cmdText(const Game& game, const char* outPath) {
     return 0;
 }
 
+int cmdSnsDecrypt(const Game& game, const fs::path& outPath) {
+    auto data = loadMainScriptRaw(game);
+    sns::decrypt(data);
+    std::ofstream out(outPath, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!out) throw std::runtime_error("cannot write " + outPath.string());
+    std::cout << "st.sns (CSD-CSCNV " << sns::version(data) << ") decrypted -> " << outPath.string() << " ("
+              << data.size() << " bytes)\n";
+    return 0;
+}
+
 int run(int argc, char** argv) {
     if (argc < 3) {
         usage();
@@ -219,6 +249,7 @@ int run(int argc, char** argv) {
         if (sub == "disasm") return cmdDisasm(gameArg(3), out);
         if (sub == "text") return cmdText(gameArg(3), out);
     }
+    if (cmd == "sns" && argc >= 5 && std::string(argv[2]) == "decrypt") return cmdSnsDecrypt(gameArg(3), fs::path(argv[4]));
     usage();
     return 2;
 }

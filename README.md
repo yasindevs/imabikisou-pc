@@ -13,11 +13,13 @@ fan translations planned.
 |---|---|
 | Reading the game straight from the `.iso` (ISO 9660), or from a folder | ✅ |
 | CRI AFS archives (list / extract) | ✅ |
-| Scenario script `scenario.sn4`: full bytecode decoding, label table, line export | ✅ structure, 🚧 opcode semantics |
+| Main script `st.sns` (CSD-CSCNV 01.68): decryption | ✅ |
+| Main script `st.sns`: bytecode, line export | 🚧 |
+| Secondary script `scenario.sn4` (ScenarioLink): bytecode, label table, line export | ✅ structure, 🚧 opcode semantics |
 | Engine (rendering, audio, video, choices) | ⏳ not started |
 | Translation patch format | ⏳ not started |
 
-Format notes: [docs/sn4-format.md](docs/sn4-format.md) (in French for now).
+Format notes (in French for now): [docs/sns-format.md](docs/sns-format.md), [docs/sn4-format.md](docs/sn4-format.md).
 
 ## Building
 
@@ -40,6 +42,7 @@ imbk ls      "Imabikisou (Japan).iso" bgm.afs
 imbk extract "Imabikisou (Japan).iso" out/ scriptchunk.afs
 imbk script text   "Imabikisou (Japan).iso" out/lines.tsv
 imbk script disasm "Imabikisou (Japan).iso" out/scenario.txt
+imbk sns decrypt   "Imabikisou (Japan).iso" out/st.sns.dec
 ```
 
 `<game>` can also be a folder that contains `PS3_GAME/` (a mounted disc or an extracted copy).
@@ -55,9 +58,9 @@ including any of the original Japanese text.
 
 ## Supported release
 
-| Title ID | Version | `scenario.sn4` CRC32 |
-|---|---|---|
-| BLJM60042 | 01.00 | `3E472406` |
+| Title ID | Version | `st.sns` CRC32 | `scenario.sn4` CRC32 |
+|---|---|---|---|
+| BLJM60042 | 01.00 | `C83EFAFA` | `3E472406` |
 
 ## License
 
