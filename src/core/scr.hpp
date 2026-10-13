@@ -17,6 +17,7 @@ struct Label {
     std::string name;
     std::uint16_t tag = 0;
     std::uint32_t target = 0; // offset in code, relative to the code base
+    std::uint32_t entry = 0;  // absolute offset of the label entry (its target field is at entry + 4)
 };
 
 struct Layout {

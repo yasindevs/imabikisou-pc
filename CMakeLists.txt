@@ -20,6 +20,8 @@ add_library(imbk_core
   src/core/scr.cpp
   src/core/sn4.cpp
   src/core/sns.cpp
+  src/core/snspatch.cpp
+  src/core/tsv.cpp
   src/core/sjis.cpp
   src/core/crc32.cpp
 )

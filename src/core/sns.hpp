@@ -33,6 +33,8 @@ constexpr std::uint8_t Page = 0x1B;
 constexpr std::uint8_t NarrationBegin = 0x1F;
 constexpr std::uint8_t NarrationEnd = 0x21;
 constexpr std::uint8_t Name = 0x37; // u8 character index: inserts that character's name
+constexpr std::uint8_t Branch = 0x49; // u8 flags, label name (conditional jump; e.g. the two exits of the prologue check)
+constexpr std::uint8_t Jump = 0x4A;  // u8 flags, label name (517 uses; e.g. the boot script's jump to the prologue)
 constexpr std::uint8_t Label = 0x4D;
 constexpr std::uint8_t MessageBegin = 0x7E; // payload ends with the message id, e.g. "__1_17"
 constexpr std::uint8_t MessageEnd = 0x7F;
@@ -62,10 +64,11 @@ struct Resources {
 };
 
 // One translatable line: text up to a wait/page/end-of-block, with inline codes rendered as tags.
+// Every instruction in [first, last) is represented in `text`, so the range can be re-encoded from it.
 struct Line {
     std::string id;   // message id ("__1_17", "#n" suffix after the first line) or "<label>#<n>"
     std::size_t file = 0;
-    std::size_t first = 0, last = 0; // instruction index range in File::code
+    std::size_t first = 0, last = 0; // instruction index range in File::code, `last` excluded
     std::string text; // UTF-8; "\n" for Newline, <ruby:reading>, <name:XX>, <XX:hex> for other inline codes
 };
 

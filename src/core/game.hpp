@@ -21,6 +21,8 @@ public:
     std::vector<std::string> chunkNames() const;
 
     std::string describe() const;
+    bool isIso() const { return iso_ != nullptr; }
+    std::vector<std::string> allFiles() const; // every file of the disc, relative and '/'-separated
 
 private:
     std::shared_ptr<const Iso9660> iso_;

@@ -48,6 +48,15 @@ std::vector<std::string> Game::chunkNames() const {
     return names;
 }
 
+std::vector<std::string> Game::allFiles() const {
+    if (iso_) return iso_->allFiles();
+    std::vector<std::string> out;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(root_))
+        if (e.is_regular_file()) out.push_back(std::filesystem::relative(e.path(), root_).generic_string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 std::string Game::describe() const { return iso_ ? "ISO image" : "disc folder " + root_.string(); }
 
 } // namespace imbk

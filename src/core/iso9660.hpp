@@ -23,6 +23,7 @@ public:
     std::optional<Entry> find(std::string_view path) const;
     std::vector<Entry> list(std::string_view dirPath) const;
     Slice open(std::string_view path) const;
+    std::vector<std::string> allFiles() const; // every file path in the image, '/'-separated
 
 private:
     std::vector<Entry> readDirectory(const Entry& dir) const;

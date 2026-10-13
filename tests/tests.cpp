@@ -6,6 +6,7 @@
 #include "core/sjis.hpp"
 #include "core/sn4.hpp"
 #include "core/sns.hpp"
+#include "core/snspatch.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -196,7 +197,9 @@ Bytes makeSnsContainer(bool badTarget) {
     b.resize(code);
 
     append(b, {0x4D, 0x04, 0x01, 'L', '1', 0x00});         // label L1
-    append(b, {0x7E, 0x05, 0x00, 0x01, 'm', '1', 0x00});   // message, id "m1"
+    append(b, {0x7E, 24});                                 // message: 18 bytes of params, u16, u8, id "m1"
+    b.insert(b.end(), 20, 0);
+    append(b, {0x01, 'm', '1', 0x00});
     append(b, {0x01, 0xE3, 0x81, 0x82, 0x02});             // text "あ"
     append(b, {0x37, 0x01, 0x00});                         // name 0
     append(b, {0x17, 0x00, 0x7F, 0x00});                   // wait, message end
@@ -206,6 +209,8 @@ Bytes makeSnsContainer(bool badTarget) {
     while (b.size() % 4) b.push_back(0);
     put32(b, 0x108, static_cast<std::uint32_t>(b.size() - file));
 
+    put32(b, 0x20, static_cast<std::uint32_t>(b.size())); // parameter table (unknown format), first after the files
+    append(b, {0, 0, 0, 0});
     // String tables: aisac, then pictures / movies / bgm / sounds; each holds one name.
     const char* names[] = {"aisac", "pic.psd", "mov.sfd", "bgm.adx", "snd"};
     for (int i = 0; i < 5; ++i) {
@@ -244,11 +249,80 @@ void testSnsContainer() {
     CHECK(!sns::Script::parse(makeSnsContainer(true)).validate().empty());
 }
 
+void testEncodeLine() {
+    CHECK(sns::encodeLine("hi") == Bytes({0x01, 'h', 'i', 0x02}));
+    CHECK(sns::encodeLine("a\nb") == Bytes({0x01, 'a', 0x02, 0x1A, 0x00, 0x01, 'b', 0x02}));
+    CHECK(sns::encodeLine("<ruby:y>Y") == Bytes({0x18, 0x01, 'y', 0x02, 0x19, 0x01, 'Y', 0x02}));
+    CHECK(sns::encodeLine("<name:05>!") == Bytes({0x37, 0x01, 0x05, 0x01, '!', 0x02}));
+    CHECK(sns::encodeLine("x<3F:02FF>") == Bytes({0x01, 'x', 0x02, 0x3F, 0x02, 0x02, 0xFF}));
+    CHECK(sns::encodeLine("1 < 2") == Bytes({0x01, '1', ' ', '<', ' ', '2', 0x02})); // not a tag
+    bool threw = false;
+    try {
+        sns::encodeLine("<01:00>");
+    } catch (const FormatError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void testSnsPatch() {
+    const auto original = sns::Script::parse(makeSnsContainer(false));
+    sns::PatchReport report;
+    const auto patched = sns::applyTranslations(
+        original, {{"m1", "\xE3\x81\x82<name:00>"}, {"L1#0", "a much longer line"}, {"L1#1", "\n<ruby:y>Y"}}, {}, report);
+    CHECK(report.errors.empty());
+    CHECK(report.replaced == 1 && report.unchanged == 2);
+    if (!report.errors.empty()) return;
+    const auto s = sns::Script::parse(patched);
+    CHECK(s.validate().empty());
+    const auto lines = s.lines();
+    CHECK(lines.size() == 3 && lines[1].text == "a much longer line");
+    CHECK(s.resources.sounds == std::vector<std::string>{"snd"}); // tables moved with the size change
+
+    sns::PatchReport bad;
+    sns::applyTranslations(original, {{"nope", "x"}}, {}, bad);
+    CHECK(bad.errors.size() == 1);
+}
+
+void testAfsRebuild() {
+    Bytes b;
+    putStr(b, 0, std::string_view("AFS\0", 4));
+    put32(b, 4, 2);
+    put32(b, 8, 0x800); put32(b, 12, 3);
+    put32(b, 16, 0x1000); put32(b, 20, 2);
+    put32(b, 24, 0x1800); put32(b, 28, 96);
+    putStr(b, 0x800, "abc");
+    putStr(b, 0x1000, "xy");
+    putStr(b, 0x1800, "first.dds");
+    put32(b, 0x1800 + 44, 3);
+    putStr(b, 0x1800 + 48, "second.sfd");
+    put32(b, 0x1800 + 48 + 44, 2);
+    b.resize(0x2000);
+
+    const auto path = std::filesystem::temp_directory_path() / "imbk_test_rebuild.afs";
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+    {
+        const auto afs = Afs::parse(Slice::wholeFile(path));
+        CHECK(afs.rebuild({}) == b);
+        const auto bigger = afs.rebuild({{"first.dds", Bytes(0x900, 'z')}});
+        const auto out = std::filesystem::temp_directory_path() / "imbk_test_rebuild2.afs";
+        std::ofstream(out, std::ios::binary).write(reinterpret_cast<const char*>(bigger.data()), static_cast<std::streamsize>(bigger.size()));
+        {
+            const auto again = Afs::parse(Slice::wholeFile(out));
+            CHECK(again.entries()[0].size == 0x900);
+            CHECK(again.entries()[1].offset == 0x1800 && again.data(again.entries()[1]).readAll() == Bytes({'x', 'y'}));
+            CHECK(again.entries()[1].name == "second.sfd");
+        }
+        std::filesystem::remove(out);
+    }
+    std::filesystem::remove(path);
+}
+
 } // namespace
 
 int main() {
     const std::pair<const char*, std::function<void()>> tests[] = {
-        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns}, {"sns container", testSnsContainer},
+        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns}, {"sns container", testSnsContainer}, {"encode line", testEncodeLine}, {"sns patch", testSnsPatch}, {"afs rebuild", testAfsRebuild},
     };
     for (const auto& [name, fn] : tests) {
         try {

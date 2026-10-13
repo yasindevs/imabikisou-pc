@@ -23,6 +23,7 @@ Layout parseLayout(ByteSpan d, std::size_t base) {
             Label label;
             label.tag = le16(d, e + 2);
             label.target = le32(d, e + 4);
+            label.entry = static_cast<std::uint32_t>(e);
             label.name = cstr(d, e + kLabelHeaderSize, std::min<std::size_t>(255, l.codeBase - e - kLabelHeaderSize));
             l.labels.push_back(std::move(label));
             if (next == 0) break;

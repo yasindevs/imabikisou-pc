@@ -8,6 +8,8 @@
 #include "core/sjis.hpp"
 #include "core/sn4.hpp"
 #include "core/sns.hpp"
+#include "core/snspatch.hpp"
+#include "core/tsv.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -47,6 +49,12 @@ Main script (residentchunk.afs/st.sns):
   imbk sns text    <game> [out.tsv]          Export lines as "<id>\t<text>"
   imbk sns disasm  <game> [out.txt]          Disassemble all script files
   imbk sns decrypt <game> <out-file>         Write the decrypted container
+
+Translation patch (test in RPCS3):
+  imbk unpack <game> <disc-dir>              Copy the disc contents to a folder RPCS3 can boot
+  imbk patch  <iso> <lines.tsv> <disc-dir> [--start <label>]
+                                             Apply translated lines to the main script in <disc-dir>;
+                                             --start makes New Game jump straight to <label> (testing)
 
 Older secondary script (scriptchunk.afs/scenario.sn4):
   imbk sn4 text    <game> [out.tsv]
@@ -89,18 +97,6 @@ sns::Script loadMainScript(const Game& game) {
     auto data = loadMainScriptRaw(game);
     sns::decrypt(data);
     return sns::Script::parse(std::move(data));
-}
-
-// One line per record: tabs, newlines and backslashes are escaped.
-std::string tsvEscape(std::string_view s) {
-    std::string out;
-    for (char c : s) {
-        if (c == '\\') out += "\\\\";
-        else if (c == '\t') out += "\\t";
-        else if (c == '\n') out += "\\n";
-        else out += c;
-    }
-    return out;
 }
 
 // Writes to the given file, or stdout when no path is given.
@@ -311,6 +307,77 @@ int cmdSnsDisasm(const Game& game, const char* outPath) {
     return 0;
 }
 
+int cmdUnpack(const Game& game, const fs::path& outDir) {
+    const auto files = game.allFiles();
+    std::uint64_t done = 0;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const auto src = game.file(files[i]);
+        const auto dst = outDir / fs::path(files[i]);
+        fs::create_directories(dst.parent_path());
+        const bool upToDate = fs::exists(dst) && fs::file_size(dst) == src.size();
+        std::printf("[%3zu/%zu] %-60s %12s%s\n", i + 1, files.size(), files[i].c_str(), sizeStr(src.size()).c_str(),
+                    upToDate ? "  (already there)" : "");
+        std::fflush(stdout);
+        if (!upToDate) src.copyTo(dst);
+        done += src.size();
+    }
+    std::cout << "Unpacked " << files.size() << " files (" << sizeStr(done) << ") to " << outDir.string() << "\n";
+    return 0;
+}
+
+int cmdPatch(const fs::path& gamePath, const fs::path& tsvPath, const fs::path& discDir, const sns::PatchOptions& options) {
+    const auto target = discDir / "PS3_GAME/USRDIR/data/chunk" / fs::path(std::string(kResidentArchive));
+    if (!fs::exists(target))
+        throw std::runtime_error(target.string() + " not found: run `imbk unpack` first to create the disc folder");
+
+    std::ifstream tsvIn(tsvPath, std::ios::binary);
+    if (!tsvIn) throw std::runtime_error("cannot read " + tsvPath.string());
+    const std::string tsv((std::istreambuf_iterator<char>(tsvIn)), std::istreambuf_iterator<char>());
+    std::vector<std::string> errors;
+    const auto translations = parseTsv(tsv, errors);
+
+    Bytes archive;
+    sns::PatchReport report;
+    report.errors = errors;
+    std::size_t scriptSize = 0;
+    {
+        // Everything is built in memory first, so <game> may be the same folder as <disc-dir>.
+        const auto game = Game::open(gamePath);
+        auto raw = loadMainScriptRaw(game);
+        if (crc32(raw) != kMainScriptCrc)
+            throw std::runtime_error("st.sns in " + gamePath.string() +
+                                     " is not the original one (already patched?): pass your ISO as <game>");
+        sns::decrypt(raw);
+        const auto script = sns::Script::parse(std::move(raw));
+        auto patched = report.errors.empty() ? sns::applyTranslations(script, translations, options, report) : Bytes{};
+        std::cout << translations.size() << " lines in " << tsvPath.filename().string() << ": " << report.replaced
+                  << " replaced, " << report.unchanged << " unchanged\n";
+        if (!options.startLabel.empty()) std::cout << "New Game starts at " << options.startLabel << " (testing aid)\n";
+        if (!report.errors.empty()) {
+            std::cout << "Patch NOT applied, " << report.errors.size() << " problem(s):\n";
+            for (std::size_t i = 0; i < report.errors.size() && i < 30; ++i) std::cout << "  - " << report.errors[i] << "\n";
+            return 1;
+        }
+        scriptSize = patched.size();
+        sns::encrypt(patched);
+        archive = Afs::parse(game.chunk(kResidentArchive)).rebuild({{std::string(kMainScriptEntry), std::move(patched)}});
+    }
+
+    const auto tmp = fs::path(target).concat(".tmp");
+    {
+        std::ofstream out(tmp, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(archive.data()), static_cast<std::streamsize>(archive.size()));
+        if (!out) throw std::runtime_error("cannot write " + tmp.string());
+    }
+    // Files copied from a mounted disc keep the read-only attribute.
+    fs::permissions(target, fs::perms::owner_write, fs::perm_options::add);
+    fs::remove(target);
+    fs::rename(tmp, target);
+    std::cout << "st.sns: " << scriptSize << " bytes (limit " << sns::kMaxScriptSize << ")\n"
+              << "Wrote " << target.string() << "\n";
+    return 0;
+}
+
 int run(int argc, char** argv) {
     if (argc < 3) {
         usage();
@@ -325,6 +392,15 @@ int run(int argc, char** argv) {
     if (cmd == "extract" && argc >= 4)
         return cmdExtract(gameArg(2), fs::path(argv[3]),
                           std::vector<std::string>(argv + 4, argv + argc));
+    if (cmd == "unpack" && argc >= 4) return cmdUnpack(gameArg(2), fs::path(argv[3]));
+    if (cmd == "patch" && argc >= 5) {
+        sns::PatchOptions options;
+        for (int i = 5; i < argc; ++i) {
+            if (std::string(argv[i]) == "--start" && i + 1 < argc) options.startLabel = argv[++i];
+            else throw std::runtime_error(std::string("unknown patch option ") + argv[i]);
+        }
+        return cmdPatch(fs::path(argv[2]), fs::path(argv[3]), fs::path(argv[4]), options);
+    }
     if ((cmd == "sn4" || cmd == "sns") && argc >= 4) {
         const std::string sub = argv[2];
         const char* out = argc > 4 ? argv[4] : nullptr;

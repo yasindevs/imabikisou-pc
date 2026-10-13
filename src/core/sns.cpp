@@ -67,6 +67,8 @@ std::string_view mnemonic(std::uint8_t op) {
     case op::NarrationEnd: return "narration_end";
     case op::Name: return "name";
     case 0x29: return "delay";
+    case op::Branch: return "branch";
+    case op::Jump: return "jump";
     case op::Label: return "label";
     case op::MessageBegin: return "message";
     case op::MessageEnd: return "message_end";
@@ -152,10 +154,10 @@ std::string Script::labelName(const Instruction& i) const {
 }
 
 std::string Script::messageId(const Instruction& i) const {
-    const auto a = args(i); // parameters, then 0x01 and the NUL-terminated id
-    for (std::size_t k = a.size(); k-- > 0;)
-        if (a[k] == 0x01) return cstr(a, k + 1, a.size() - k - 1);
-    return {};
+    // 18 bytes of parameters, u16, u8 (1 or 2), then the NUL-terminated id ("__1_17").
+    constexpr std::size_t kIdOffset = 21;
+    const auto a = args(i);
+    return a.size() <= kIdOffset ? std::string() : cstr(a, kIdOffset, a.size() - kIdOffset);
 }
 
 std::vector<Line> Script::lines() const {
@@ -186,9 +188,14 @@ std::vector<Line> Script::lines() const {
             hasText = false;
         };
 
+        // Label targets must stay on line boundaries, so that a line can be re-encoded as a whole.
+        std::set<std::uint32_t> targets;
+        for (const auto& l : files[f].labels) targets.insert(l.target);
+
         for (std::size_t i = 0; i < code.size(); ++i) {
             const auto& in = code[i];
             const auto a = args(in);
+            if (!cur.text.empty() && targets.contains(in.offset)) flush(i);
             if (cur.text.empty()) cur.first = i;
             switch (in.opcode) {
             case op::Text:
@@ -229,13 +236,13 @@ std::vector<Line> Script::lines() const {
                     cur.text += in.opcode == op::Name ? "<name" : tag;
                     if (!a.empty()) cur.text += ":" + hexOf(a);
                     cur.text += ">";
-                } else if (hasText) {
-                    flush(i);
+                } else if (!inBlock) {
+                    flush(i); // ends a free-standing narration line (or drops a text-less fragment)
                 }
                 break;
             }
         }
-        flush(code.empty() ? 0 : code.size() - 1);
+        flush(code.size());
     }
     return out;
 }
@@ -260,8 +267,17 @@ std::vector<std::string> Script::validate() const {
             if (!globalLabels.insert(name).second) problems.push_back("label " + name + " declared in several files");
     }
     std::set<std::string> ids;
-    for (const auto& l : lines())
+    for (const auto& l : lines()) {
         if (!ids.insert(l.id).second) problems.push_back("duplicate line id " + l.id);
+        for (unsigned char c : l.id)
+            if (c <= 0x20 || c >= 0x7F) {
+                problems.push_back(files[l.file].name + ": line id with a non-printable character");
+                break;
+            }
+    }
+    for (const auto& f : files)
+        for (const auto& in : f.code)
+            if (in.opcode == op::MessageBegin && messageId(in).empty()) problems.push_back(f.name + ": message without id");
     return problems;
 }
 

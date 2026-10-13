@@ -17,9 +17,10 @@ fan translations planned.
 | Main script `st.sns`: bytecode structure, labels, line export (19,018 lines) | ✅ structure, 🚧 opcode semantics |
 | Secondary script `scenario.sn4` (ScenarioLink): bytecode, label table, line export | ✅ structure, 🚧 opcode semantics |
 | Engine (rendering, audio, video, choices) | ⏳ not started |
-| Translation patch format | ⏳ not started |
+| Translation patch: `imbk patch` rebuilds the main script and `residentchunk.afs` | ✅ verified offline, 🚧 in-game test |
 
-Format notes (in French for now): [docs/sns-format.md](docs/sns-format.md), [docs/sn4-format.md](docs/sn4-format.md).
+Docs (in French for now): [docs/patching.md](docs/patching.md), [docs/sns-format.md](docs/sns-format.md),
+[docs/sn4-format.md](docs/sn4-format.md).
 
 ## Building
 
@@ -45,6 +46,10 @@ imbk sns text    "Imabikisou (Japan).iso" out/lines.tsv
 imbk sns disasm  "Imabikisou (Japan).iso" out/script.txt
 imbk sns decrypt "Imabikisou (Japan).iso" out/st.sns.dec
 imbk sn4 text    "Imabikisou (Japan).iso" out/sn4_lines.tsv   # older secondary script
+
+# Translation patch, tested in RPCS3 (see docs/patching.md)
+imbk unpack "Imabikisou (Japan).iso" out/disc
+imbk patch  "Imabikisou (Japan).iso" out/my_translation.tsv out/disc
 ```
 
 `<game>` can also be a folder that contains `PS3_GAME/` (a mounted disc or an extracted copy).

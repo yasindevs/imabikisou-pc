@@ -43,7 +43,9 @@ std::size_t parseRecord(ByteSpan d, std::size_t o, bool joliet, Iso9660::Entry& 
     out.name.clear();
     if (nameLen == 1 && (d[o + 33] == 0 || d[o + 33] == 1)) {
         out.name = d[o + 33] == 0 ? "." : "..";
-    } else if (joliet) {
+        return len;
+    }
+    if (joliet) {
         for (std::size_t i = 0; i + 1 < nameLen; i += 2) {
             const unsigned c = be16(d, o + 33 + i);
             out.name.push_back(c < 0x80 ? static_cast<char>(c) : '?');
@@ -124,6 +126,22 @@ std::vector<Iso9660::Entry> Iso9660::list(std::string_view dirPath) const {
     const auto dir = find(dirPath);
     if (!dir || !dir->isDirectory) throw std::runtime_error("no such directory in ISO: " + std::string(dirPath));
     return readDirectory(*dir);
+}
+
+std::vector<std::string> Iso9660::allFiles() const {
+    std::vector<std::string> out;
+    std::vector<std::pair<std::string, Entry>> stack{{"", root_}};
+    while (!stack.empty()) {
+        auto [prefix, dir] = stack.back();
+        stack.pop_back();
+        for (const auto& e : readDirectory(dir)) {
+            const auto path = prefix.empty() ? e.name : prefix + "/" + e.name;
+            if (e.isDirectory) stack.emplace_back(path, e);
+            else out.push_back(path);
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 Slice Iso9660::open(std::string_view path) const {
