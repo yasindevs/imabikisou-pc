@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/binary.hpp"
+#include "core/scr.hpp"
 
 #include <optional>
 #include <string_view>
@@ -27,14 +27,8 @@ constexpr std::uint8_t Label = 0x85;
 constexpr std::uint8_t TextEnd = 0x03;
 } // namespace op
 
-constexpr std::uint16_t kSceneLabelTag = 0x6F4E; // "No"
-constexpr std::uint16_t kLocalLabelTag = 0xFFFF; // "_AMIn" labels used by choices
-
-struct Label {
-    std::string name;
-    std::uint16_t tag = 0;
-    std::uint32_t target = 0; // offset in code, relative to Script::codeBase
-};
+using scr::kSceneLabelTag;
+using scr::Label;
 
 struct Instruction {
     std::uint32_t offset = 0; // relative to Script::codeBase

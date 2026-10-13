@@ -13,8 +13,8 @@ fan translations planned.
 |---|---|
 | Reading the game straight from the `.iso` (ISO 9660), or from a folder | ✅ |
 | CRI AFS archives (list / extract) | ✅ |
-| Main script `st.sns` (CSD-CSCNV 01.68): decryption | ✅ |
-| Main script `st.sns`: bytecode, line export | 🚧 |
+| Main script `st.sns` (CSD-CSCNV 01.68): decryption, container, resource tables | ✅ |
+| Main script `st.sns`: bytecode structure, labels, line export (19,018 lines) | ✅ structure, 🚧 opcode semantics |
 | Secondary script `scenario.sn4` (ScenarioLink): bytecode, label table, line export | ✅ structure, 🚧 opcode semantics |
 | Engine (rendering, audio, video, choices) | ⏳ not started |
 | Translation patch format | ⏳ not started |
@@ -40,9 +40,11 @@ imbk verify  "Imabikisou (Japan).iso"         # check that your dump is the supp
 imbk info    "Imabikisou (Japan).iso"         # metadata and archive overview
 imbk ls      "Imabikisou (Japan).iso" bgm.afs
 imbk extract "Imabikisou (Japan).iso" out/ scriptchunk.afs
-imbk script text   "Imabikisou (Japan).iso" out/lines.tsv
-imbk script disasm "Imabikisou (Japan).iso" out/scenario.txt
-imbk sns decrypt   "Imabikisou (Japan).iso" out/st.sns.dec
+imbk sns info    "Imabikisou (Japan).iso"
+imbk sns text    "Imabikisou (Japan).iso" out/lines.tsv
+imbk sns disasm  "Imabikisou (Japan).iso" out/script.txt
+imbk sns decrypt "Imabikisou (Japan).iso" out/st.sns.dec
+imbk sn4 text    "Imabikisou (Japan).iso" out/sn4_lines.tsv   # older secondary script
 ```
 
 `<game>` can also be a folder that contains `PS3_GAME/` (a mounted disc or an extracted copy).
@@ -52,8 +54,8 @@ Files written by these commands contain game content. They are for your own use 
 
 ### Line IDs
 
-`imbk script text` gives every line of the script a stable ID, `<scene label>#<n>` (for example
-`AMI_0000_0200#2`). Translation files will refer to lines by ID only, so they can be shared without
+`imbk sns text` gives every line of the script a stable ID: the game's own message ID for dialogue
+(`__1_17`), or `<scene label>#<n>` for narration (`S00A_0000_0100#2`). Translation files will refer to lines by ID only, so they can be shared without
 including any of the original Japanese text.
 
 ## Supported release

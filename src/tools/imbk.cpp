@@ -41,9 +41,16 @@ Usage:
   imbk verify  <game>                        Check that <game> is the supported release
   imbk ls      <game> [archive.afs]          List archives, or the entries of one archive
   imbk extract <game> <out-dir> [archive...] Extract archive entries (all archives by default)
-  imbk script disasm <game> [out.txt]        Disassemble scenario.sn4
-  imbk script text   <game> [out.tsv]        Export dialogue lines as "<id>\t<text>"
-  imbk sns decrypt   <game> <out-file>       Write the decrypted main script (st.sns)
+
+Main script (residentchunk.afs/st.sns):
+  imbk sns info    <game>                    Files, labels, resources and line counts
+  imbk sns text    <game> [out.tsv]          Export lines as "<id>\t<text>"
+  imbk sns disasm  <game> [out.txt]          Disassemble all script files
+  imbk sns decrypt <game> <out-file>         Write the decrypted container
+
+Older secondary script (scriptchunk.afs/scenario.sn4):
+  imbk sn4 text    <game> [out.tsv]
+  imbk sn4 disasm  <game> [out.txt]
 
 <game> is your Imabikisou .iso, or a folder containing PS3_GAME/ (mounted disc or extracted copy).
 Output written to stdout or files is UTF-8.
@@ -76,6 +83,24 @@ Bytes loadMainScriptRaw(const Game& game) {
     const auto* e = afs.find(kMainScriptEntry);
     if (!e) throw std::runtime_error(std::string(kMainScriptEntry) + " not found in " + std::string(kResidentArchive));
     return afs.data(*e).readAll();
+}
+
+sns::Script loadMainScript(const Game& game) {
+    auto data = loadMainScriptRaw(game);
+    sns::decrypt(data);
+    return sns::Script::parse(std::move(data));
+}
+
+// One line per record: tabs, newlines and backslashes are escaped.
+std::string tsvEscape(std::string_view s) {
+    std::string out;
+    for (char c : s) {
+        if (c == '\\') out += "\\\\";
+        else if (c == '\t') out += "\\t";
+        else if (c == '\n') out += "\\n";
+        else out += c;
+    }
+    return out;
 }
 
 // Writes to the given file, or stdout when no path is given.
@@ -137,6 +162,15 @@ int cmdVerify(const Game& game) {
     std::cout << "st.sns        : CSD-CSCNV " << (sns::isSns(sns) ? sns::version(sns) : "?") << ", CRC32 " << hex(snsCrc)
               << (snsOk ? "  OK" : "  UNEXPECTED") << "\n";
     ok &= snsOk;
+
+    const auto main = loadMainScript(game);
+    std::size_t instructions = 0;
+    for (const auto& f : main.files) instructions += f.code.size();
+    const auto mainProblems = main.validate();
+    std::cout << "st.sns        : " << main.files.size() << " files, " << instructions << " instructions, "
+              << main.lines().size() << " lines" << (mainProblems.empty() ? "  OK" : "  INCONSISTENT") << "\n";
+    for (std::size_t i = 0; i < mainProblems.size() && i < 20; ++i) std::cout << "  - " << mainProblems[i] << "\n";
+    ok &= mainProblems.empty();
 
     std::cout << (ok ? "\nThis copy is supported.\n" : "\nThis copy does not match the supported release.\n");
     return ok ? 0 : 1;
@@ -229,6 +263,54 @@ int cmdSnsDecrypt(const Game& game, const fs::path& outPath) {
     return 0;
 }
 
+int cmdSnsInfo(const Game& game) {
+    const auto s = loadMainScript(game);
+    const auto lines = s.lines();
+    std::vector<std::size_t> perFile(s.files.size());
+    for (const auto& l : lines) ++perFile[l.file];
+    std::cout << "st.sns  CSD-CSCNV " << s.version << ", start label " << s.startLabel << "\n\n";
+    std::printf("  %-22s %8s %7s %7s\n", "file", "code", "labels", "lines");
+    for (std::size_t i = 0; i < s.files.size(); ++i) {
+        const auto& f = s.files[i];
+        std::printf("  %-22s %8zu %7zu %7zu\n", f.name.c_str(), f.code.size(), f.labels.size(), perFile[i]);
+    }
+    const auto& r = s.resources;
+    std::cout << "\nResources: " << r.pictures.size() << " pictures, " << r.movies.size() << " movies, " << r.bgm.size()
+              << " bgm, " << r.sounds.size() << " sounds, " << r.aisac.size() << " AISAC controls\n"
+              << "Lines: " << lines.size() << "\n";
+    return 0;
+}
+
+int cmdSnsText(const Game& game, const char* outPath) {
+    const auto s = loadMainScript(game);
+    Output o(outPath);
+    for (const auto& line : s.lines()) o.out() << line.id << '\t' << tsvEscape(line.text) << '\n';
+    return 0;
+}
+
+int cmdSnsDisasm(const Game& game, const char* outPath) {
+    const auto s = loadMainScript(game);
+    Output o(outPath);
+    auto& out = o.out();
+    out << "; st.sns  CSD-CSCNV " << s.version << "  start label " << s.startLabel << "\n";
+    for (const auto& f : s.files) {
+        out << "\n;; ===== " << f.name << "  (code base 0x" << hex(f.codeBase, 0) << ", " << f.labels.size()
+            << " labels)\n";
+        for (const auto& in : f.code) {
+            const auto a = s.args(in);
+            if (in.opcode == sns::op::Label) out << "\n" << s.labelName(in) << ":\n";
+            std::string m(sns::mnemonic(in.opcode));
+            m.resize(std::max<std::size_t>(m.size(), 13), ' ');
+            out << hex(in.offset, 6) << "  " << hex(in.opcode, 2) << " " << m;
+            if (in.opcode == sns::op::Text) out << " \"" << std::string_view(reinterpret_cast<const char*>(a.data()), a.size()) << "\"";
+            else if (in.opcode == sns::op::MessageBegin) out << " id=" << s.messageId(in) << "  [" << hexBytes(a) << "]";
+            else if (!a.empty()) out << " [" << a.size() << "] " << hexBytes(a) << "  | " << printable(a);
+            out << "\n";
+        }
+    }
+    return 0;
+}
+
 int run(int argc, char** argv) {
     if (argc < 3) {
         usage();
@@ -243,13 +325,16 @@ int run(int argc, char** argv) {
     if (cmd == "extract" && argc >= 4)
         return cmdExtract(gameArg(2), fs::path(argv[3]),
                           std::vector<std::string>(argv + 4, argv + argc));
-    if (cmd == "script" && argc >= 4) {
+    if ((cmd == "sn4" || cmd == "sns") && argc >= 4) {
         const std::string sub = argv[2];
         const char* out = argc > 4 ? argv[4] : nullptr;
-        if (sub == "disasm") return cmdDisasm(gameArg(3), out);
-        if (sub == "text") return cmdText(gameArg(3), out);
+        if (cmd == "sn4" && sub == "disasm") return cmdDisasm(gameArg(3), out);
+        if (cmd == "sn4" && sub == "text") return cmdText(gameArg(3), out);
+        if (cmd == "sns" && sub == "info") return cmdSnsInfo(gameArg(3));
+        if (cmd == "sns" && sub == "text") return cmdSnsText(gameArg(3), out);
+        if (cmd == "sns" && sub == "disasm") return cmdSnsDisasm(gameArg(3), out);
+        if (cmd == "sns" && sub == "decrypt" && out) return cmdSnsDecrypt(gameArg(3), fs::path(out));
     }
-    if (cmd == "sns" && argc >= 5 && std::string(argv[2]) == "decrypt") return cmdSnsDecrypt(gameArg(3), fs::path(argv[4]));
     usage();
     return 2;
 }

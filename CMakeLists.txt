@@ -17,6 +17,7 @@ add_library(imbk_core
   src/core/game.cpp
   src/core/sfo.cpp
   src/core/afs.cpp
+  src/core/scr.cpp
   src/core/sn4.cpp
   src/core/sns.cpp
   src/core/sjis.cpp

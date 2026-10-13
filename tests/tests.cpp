@@ -174,11 +174,81 @@ void testSns() {
     CHECK(enc == plain);
 }
 
+// Builds a decrypted st.sns container with one script file, one label and resource tables.
+Bytes makeSnsContainer(bool badTarget) {
+    Bytes b;
+    appendStr(b, std::string_view("CSD-CSCNV:01.68\0", 16));
+    putStr(b, 0xE0, "L1");
+    const std::size_t file = 0x110;
+    put32(b, 0x100, 1);
+    put32(b, 0x104, file);
+
+    putStr(b, file, "test.xml");
+    const std::size_t table = file + 0x30;
+    const std::size_t entry = table + 257 * 4;
+    const std::size_t code = entry + 12; // 8-byte entry header + "L1\0" padded to 4
+    put32(b, table + 3 * 4, static_cast<std::uint32_t>(entry - file));
+    put32(b, table + 256 * 4, static_cast<std::uint32_t>(code - file));
+    put16(b, entry, 0);
+    put16(b, entry + 2, scr::kSceneLabelTag);
+    put32(b, entry + 4, badTarget ? 5 : 6); // just after the label instruction below
+    putStr(b, entry + 8, std::string_view("L1\0\0", 4));
+    b.resize(code);
+
+    append(b, {0x4D, 0x04, 0x01, 'L', '1', 0x00});         // label L1
+    append(b, {0x7E, 0x05, 0x00, 0x01, 'm', '1', 0x00});   // message, id "m1"
+    append(b, {0x01, 0xE3, 0x81, 0x82, 0x02});             // text "あ"
+    append(b, {0x37, 0x01, 0x00});                         // name 0
+    append(b, {0x17, 0x00, 0x7F, 0x00});                   // wait, message end
+    append(b, {0x01, 'h', 'i', 0x02, 0x17, 0x00, 0x1A, 0x00}); // narration "hi", wait, newline
+    append(b, {0x18, 0x01, 'y', 0x02, 0x19, 0x01, 'Y', 0x02, 0x1B, 0x00}); // ruby y over Y, page
+    append(b, {0x9C, 0x00});                               // return
+    while (b.size() % 4) b.push_back(0);
+    put32(b, 0x108, static_cast<std::uint32_t>(b.size() - file));
+
+    // String tables: aisac, then pictures / movies / bgm / sounds; each holds one name.
+    const char* names[] = {"aisac", "pic.psd", "mov.sfd", "bgm.adx", "snd"};
+    for (int i = 0; i < 5; ++i) {
+        const auto t = static_cast<std::uint32_t>(b.size());
+        put32(b, t, 0);
+        const std::size_t ptr = i == 0 ? 0x28 : 0x60 + (i - 1) * 8;
+        put32(b, ptr, t);
+        put32(b, ptr + 4, t + 4);
+        appendStr(b, names[i]);
+        b.push_back(0);
+    }
+    return b;
+}
+
+void testSnsContainer() {
+    auto data = makeSnsContainer(false);
+    sns::encrypt(data);
+    sns::decrypt(data);
+    const auto s = sns::Script::parse(data);
+    CHECK(s.version == "01.68");
+    CHECK(s.startLabel == "L1");
+    CHECK(s.files.size() == 1 && s.files[0].name == "test.xml");
+    CHECK(s.resources.pictures == std::vector<std::string>{"pic.psd"});
+    CHECK(s.resources.sounds == std::vector<std::string>{"snd"});
+    CHECK(s.resources.aisac == std::vector<std::string>{"aisac"});
+    CHECK(s.files[0].code.back().opcode == sns::op::Return);
+    CHECK(s.validate().empty());
+
+    const auto lines = s.lines();
+    CHECK(lines.size() == 3);
+    if (lines.size() == 3) {
+        CHECK(lines[0].id == "m1" && lines[0].text == "\xE3\x81\x82<name:00>");
+        CHECK(lines[1].id == "L1#0" && lines[1].text == "hi");
+        CHECK(lines[2].id == "L1#1" && lines[2].text == "\n<ruby:y>Y");
+    }
+    CHECK(!sns::Script::parse(makeSnsContainer(true)).validate().empty());
+}
+
 } // namespace
 
 int main() {
     const std::pair<const char*, std::function<void()>> tests[] = {
-        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns},
+        {"crc32", testCrc32}, {"sjis", testSjis}, {"sfo", testSfo}, {"afs", testAfs}, {"sn4", testSn4}, {"sns", testSns}, {"sns container", testSnsContainer},
     };
     for (const auto& [name, fn] : tests) {
         try {

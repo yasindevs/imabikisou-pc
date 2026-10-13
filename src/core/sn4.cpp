@@ -8,9 +8,6 @@ namespace imbk::sn4 {
 namespace {
 
 constexpr std::size_t kHeaderBlockTable = 0xA0; // u32 count, then (u32 offset, u32 size) blocks
-constexpr std::size_t kScrHeaderSize = 0x30;    // "SCR-file:Ver:..." + padding
-constexpr std::size_t kBuckets = 256;
-constexpr std::size_t kLabelEntrySize = 24;
 
 } // namespace
 
@@ -66,28 +63,9 @@ Script Script::parse(Bytes data) {
     require(d, block, blockSize, "SCR block");
     if (!startsWith(d, block, "SCR-file")) throw FormatError("missing SCR-file block");
 
-    // 256 hash buckets (offsets relative to the SCR block, 0 = empty), then the code offset.
-    const std::size_t table = block + kScrHeaderSize;
-    s.codeBase = static_cast<std::uint32_t>(block + le32(d, table + kBuckets * 4));
-    require(d, s.codeBase, 0, "code base");
-
-    for (std::size_t b = 0; b < kBuckets; ++b) {
-        std::size_t e = le32(d, table + b * 4);
-        if (e == 0) continue;
-        e += block;
-        for (std::size_t guard = 0;; ++guard) {
-            require(d, e, kLabelEntrySize, "label entry");
-            if (e + kLabelEntrySize > s.codeBase || guard > 4096) throw FormatError("corrupt label chain");
-            Label l;
-            l.tag = le16(d, e + 2);
-            l.target = le32(d, e + 4);
-            l.name = cstr(d, e + 8, 16);
-            s.labels.push_back(std::move(l));
-            const auto next = le16(d, e);
-            if (next == 0) break;
-            e += next;
-        }
-    }
+    auto layout = scr::parseLayout(d, block);
+    s.codeBase = static_cast<std::uint32_t>(layout.codeBase);
+    s.labels = std::move(layout.labels);
 
     const std::size_t end = block + blockSize;
     for (std::size_t o = s.codeBase; o < end;) {
