@@ -1,0 +1,40 @@
+# --- Game data: NEVER commit anything from the disc ---
+*.iso
+*.bin
+*.afs
+*.sn4
+*.spk
+*.sfd
+*.adx
+*.aix
+*.csb
+*.dds
+*.at3
+*.pam
+*.sfo
+*.pup
+*.ttf
+*.ttc
+PS3_GAME/
+PS3_UPDATE/
+PS3_DISC.SFB
+
+# Tool output (extracted assets, script dumps)
+/out/
+/extracted/
+/dump/
+*.tsv
+
+# Build
+/build/
+/build-*/
+*.exe
+*.o
+*.obj
+
+# Editors / OS
+.vscode/
+.idea/
+.vs/
+Thumbs.db
+.DS_Store
