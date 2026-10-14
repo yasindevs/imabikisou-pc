@@ -4,11 +4,11 @@
   "files": [
     {
       "path": "libs/audio/cellAudio.c",
-      "patched_sha256_lf": "842b842e689ab7079d1692794b014b5fe6f6bbcad1d39a94408830755e5354d5"
+      "patched_sha256_lf": "78255e348c3c7d403a1a4baa24816c35a709eb24c3d7aabd565c2867193b9a1e"
     },
     {
       "path": "libs/font/cellFont.c",
-      "patched_sha256_lf": "00a7dcb5e21efaaa98dc030c944c873d0422bb082181539c17392ddcc5a7ebf7"
+      "patched_sha256_lf": "36f10200f963639c6fc749ad0787a5881b0877d95f18297d58b0e8aaca93fbf1"
     },
     {
       "path": "libs/font/cellFont.h",
@@ -16,7 +16,7 @@
     },
     {
       "path": "libs/input/cellPad.c",
-      "patched_sha256_lf": "44d730640edad854e0ba4f8e01be3cdc8b436fb1ef474823a9c4abc2b61baba6"
+      "patched_sha256_lf": "a09920827a39568b0f1ff0d20f0c87b330d65dc1fcd6235009add1cd7fcb7888"
     },
     {
       "path": "libs/input/cellPad.h",
@@ -55,6 +55,10 @@
       "patched_sha256_lf": "1323a718707ddb4138fa4196356f11e8cebd9c27ea891cb863fc54e0eb37b849"
     },
     {
+      "path": "runtime/ppu/ppu_fs.cpp",
+      "patched_sha256_lf": "6fcbe3cfba44dec5797784098a3d49e922c48a94ac1ea9a89f12bde4f4fbe8d0"
+    },
+    {
       "path": "runtime/ppu/ppu_hle.cpp",
       "patched_sha256_lf": "aab2dd1555daf61d877b87a1ec7464d49c616174d1e67013ec8ca5c143d73553"
     },
@@ -68,11 +72,19 @@
     },
     {
       "path": "runtime/spu/spu_channels.c",
-      "patched_sha256_lf": "1b298375c7dbb239a4e08842a7356cdb4fee83a6044148017886b8886fddb345"
+      "patched_sha256_lf": "d8efed2ab8b32dbaec04a11a83bf36a7f07e2cb15c3af34ba459c2a5ffc8c866"
     },
     {
       "path": "runtime/spu/spu_coherency.c",
       "patched_sha256_lf": "36b071865f91e6474dd96388911168c8e263271c876df7f1f1c7f58ba96bb622"
+    },
+    {
+      "path": "runtime/spu/spu_context.h",
+      "patched_sha256_lf": "201f77730a3c52586bc0051d9d18ef2d4c15021bef71d3a8097685eaee9c552e"
+    },
+    {
+      "path": "runtime/spu/spu_helpers.h",
+      "patched_sha256_lf": "8601ffd3934325fbb900dad335bd319cf1e0f788999f2d247682c2ff6f1a7a75"
     },
     {
       "path": "runtime/spu/spu_lifted_thread.c",
@@ -88,7 +100,7 @@
     },
     {
       "path": "runtime/syscalls/lv2_register.c",
-      "patched_sha256_lf": "fdf1322a48100914013cdc3fb228244169e47912549e6c5a2588fbe7e06b5a9c"
+      "patched_sha256_lf": "9e6f70a5b92a8fb6ea999914bc90192f98d9d748b45e9fa2cd59d15906516710"
     },
     {
       "path": "runtime/syscalls/sys_ppu_thread.c",

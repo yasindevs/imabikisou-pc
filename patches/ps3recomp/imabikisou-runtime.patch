@@ -1,6 +1,6 @@
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
-@@ -126,7 +126,27 @@
+@@ -126,10 +126,31 @@
      /* For address reporting to guest */
      u64                  port_addr;      /* guest-visible buffer address */
      u64                  read_idx_addr;  /* guest-visible read index address */
@@ -28,7 +28,11 @@
  
  static int            s_audio_initialized = 0;
  static AudioPortSlot  s_ports[CELL_AUDIO_PORT_MAX];
-@@ -359,7 +379,14 @@
++static uint64_t       s_tag_us[CELL_AUDIO_PORT_MAX][32];   /* last GetPortBlockTag per slot */
+ 
+ /* Event queue notification */
+ typedef struct {
+@@ -359,7 +380,14 @@
      BYTE* buf = NULL;
      HRESULT hr = s_wasapi_render->lpVtbl->GetBuffer(s_wasapi_render, num_samples, &buf);
      if (SUCCEEDED(hr) && buf) {
@@ -44,7 +48,7 @@
          s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples, 0);
      }
  }
-@@ -443,8 +470,20 @@
+@@ -443,8 +471,20 @@
          if (level <= 0.0f) level = 1.0f;
          if (level > 1.0f) level = 1.0f;
  
@@ -67,7 +71,7 @@
          u32 block_offset = block_idx * CELL_AUDIO_BLOCK_SAMPLES * nch;
          float* src = port->buffer + block_offset;
  
-@@ -453,7 +492,12 @@
+@@ -453,7 +493,12 @@
           * writes" from "writer and reader cycle out of phase". */
          { static int s_pk = -1; if (s_pk < 0) s_pk = getenv("AUDIO_PEAK") ? 1 : 0;
            if (s_pk) { static _Thread_local unsigned _c;
@@ -81,7 +85,7 @@
                  char map[36]; u32 b;
                  for (b = 0; b < nblock && b < 32; b++) {
                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
-@@ -493,6 +537,19 @@
+@@ -493,6 +538,47 @@
              s_mix_buffer[s * 2 + 1] += right;
          }
  
@@ -98,10 +102,38 @@
 +              fprintf(stderr, "[audio-blk] k=%u port=%d blk=%u nch=%u src_nonzero=%u mix_nonzero=%u level=%.3f\n",
 +                      s_k, p, block_idx, nch, nzs, nzm, level);
 +          } }
++        /* AUDIO_PARTIAL=1: a block read half written (data head, zero tail)
++         * vs the time since the title asked for its tag, and the cursor gap. */
++        { static int on = -1; if (on < 0) on = getenv("AUDIO_PARTIAL") ? 1 : 0;
++          if (on) {
++            const u32 fs = CELL_AUDIO_BLOCK_SAMPLES * nch;
++            int head = 0, tail = 1;
++            for (u32 i = 0; i < fs / 4; i++) if (src[i] != 0.0f) { head = 1; break; }
++            for (u32 i = fs - fs / 4; i < fs; i++) if (src[i] != 0.0f) { tail = 0; break; }
++            const long long dt = block_idx < 32 && s_tag_us[p][block_idx]
++                ? (long long)(ps3_system_time_us() - s_tag_us[p][block_idx]) : -1;
++            static unsigned hist[8], cnt;
++            int b = dt < 0 ? 0 : dt < 2000 ? 1 : dt < 4000 ? 2 : dt < 6000 ? 3 : dt < 8000 ? 4 : dt < 12000 ? 5 : dt < 20000 ? 6 : 7;
++            hist[b]++;
++            if (head && tail)
++                fprintf(stderr, "[audio-partial] port %d blk %u dt=%lldus gap=%lld\n", p, block_idx, dt,
++                        (long long)(port->write_index - port->read_index));
++            /* The producer's own starvation: data, then a tail that is only
++             * filter residue (~1e-8) -- a voice ran dry inside the block. */
++            { int lead = 0, dry = 1;
++              for (u32 i = 0; i < fs / 4; i++) if (fabsf(ld_be_f32(&src[i])) > 1e-3f) { lead = 1; break; }
++              for (u32 i = fs / 2; i < fs; i++) if (fabsf(ld_be_f32(&src[i])) > 1e-6f) { dry = 0; break; }
++              if (lead && dry)
++                  fprintf(stderr, "[audio-starve] t=%llums port %d blk %u\n",
++                          (unsigned long long)(ps3_system_time_us() / 1000), p, block_idx); }
++            if (++cnt % 1875 == 0)
++                fprintf(stderr, "[audio-dt] tag->read none:%u <2:%u <4:%u <6:%u <8:%u <12:%u <20:%u more:%u (ms)\n",
++                        hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]);
++          } }
          /* Firmware clears a ring-buffer block after consuming it. Besides
           * preventing stale PCM from replaying when a producer stalls, the
           * cleared block is an observable consumption signal for producers. */
-@@ -502,7 +559,14 @@
+@@ -502,7 +588,14 @@
           * ring slot to the guest. SurMixer multiplies this value by the block
           * size directly; an unbounded counter walks beyond the audio buffer. */
          port->read_index++;
@@ -117,7 +149,7 @@
              vm_write64((u32)port->read_idx_addr, port->read_index % nblock);
      }
  
-@@ -538,6 +602,7 @@
+@@ -538,6 +631,7 @@
  static unsigned __stdcall audio_mix_thread_func(void* arg)
  {
      (void)arg;
@@ -125,7 +157,73 @@
      printf("[cellAudio] Mixing thread started\n");
  
      /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
-@@ -863,6 +928,13 @@
+@@ -548,6 +642,65 @@
+      * With no device, pace on the performance counter instead. */
+     LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+     unsigned long long blocks = 0;
++    /* Guest-paced mixing (default; AUDIO_PACED=0 restores device pacing).
++     * The device asks for audio in ~10 ms bursts, so pacing on its free room
++     * consumed two guest blocks back to back: the producer (libmixer -> CRI
++     * SPU renderer -> DMA, woken by the period notify) had ~0 ms for the
++     * second one and the mixer read it half written -- blocks cut off after
++     * 64 or 128 samples, heard as crackle. Consume guest blocks on a steady
++     * 5.33 ms clock like the hardware, into a host FIFO the device drains;
++     * the FIFO level slaves that clock to the device clock. */
++#if AUDIO_BACKEND_WASAPI
++    const char* pe = getenv("AUDIO_PACED");
++    if (!(pe && *pe == '0') && s_wasapi_client) {
++        enum { FIFO_FRAMES = 8192, TARGET = 3 * CELL_AUDIO_BLOCK_SAMPLES };
++        static float fifo[FIFO_FRAMES * 2];
++        unsigned fr = 0, fw = 0;            /* frame counters, fw - fr = level */
++        const long long period = qf.QuadPart * CELL_AUDIO_BLOCK_SAMPLES / CELL_AUDIO_SAMPLE_RATE;
++        long long due = q0.QuadPart;
++        while (s_mix_thread_running) {
++            /* Feed the device from the FIFO. */
++            int room = audio_backend_room();
++            if (room > 0 && fw != fr) {
++                unsigned n = fw - fr; if (n > (unsigned)room) n = (unsigned)room;
++                unsigned o = fr % FIFO_FRAMES, c = FIFO_FRAMES - o; if (c > n) c = n;
++                audio_backend_submit(fifo + o * 2, c);
++                if (n > c) audio_backend_submit(fifo, n - c);
++                fr += n; room -= (int)n;
++            }
++            LARGE_INTEGER now; QueryPerformanceCounter(&now);
++            const unsigned level = fw - fr;
++            const unsigned dev = room >= 0 ? s_wasapi_buf_frames - (unsigned)room : 0;
++            /* Slave to the device: run early when it is about to starve,
++             * hold back while the FIFO is fuller than its target. */
++            if (now.QuadPart < due && level + dev >= (unsigned)CELL_AUDIO_BLOCK_SAMPLES) { Sleep(1); continue; }
++            if (level >= TARGET + 2 * CELL_AUDIO_BLOCK_SAMPLES) { due = now.QuadPart + period; Sleep(1); continue; }
++            if (now.QuadPart - due > qf.QuadPart / 20) due = now.QuadPart;   /* stall: no burst */
++            due += period;
++            blocks++;
++            audio_mix_one_block();
++            { static FILE* _wf = (FILE*)-1;
++              if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
++              if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
++            if (level + CELL_AUDIO_BLOCK_SAMPLES <= FIFO_FRAMES) {
++                for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES; i++, fw++) {
++                    fifo[(fw % FIFO_FRAMES) * 2 + 0] = s_mix_buffer[i * 2 + 0];
++                    fifo[(fw % FIFO_FRAMES) * 2 + 1] = s_mix_buffer[i * 2 + 1];
++                }
++            } else g_audio_dropped += CELL_AUDIO_BLOCK_SAMPLES;
++            { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
++              if (on) { static ULONGLONG t0; static unsigned n; static unsigned long long d0;
++                ULONGLONG nt = GetTickCount64(); if (!t0) t0 = nt; n++;
++                if (nt - t0 >= 5000) {
++                    fprintf(stderr, "[audio-rate] paced %.1f blocks/s, fifo %u, device %u, dropped %.0f frames/s%c",
++                            n * 1000.0 / (nt - t0), fw - fr, dev, (g_audio_dropped - d0) * 1000.0 / (nt - t0), 10);
++                    n = 0; d0 = g_audio_dropped; t0 = nt; } } }
++            audio_notify_event_queues();
++        }
++        printf("[cellAudio] Mixing thread stopped\n");
++        return 0;
++    }
++#endif
+     while (s_mix_thread_running) {
+         const int room = audio_backend_room();
+         if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+@@ -863,6 +1016,13 @@
  
      mutex_lock(&s_audio_mutex);
      s_ports[portNum].running = 1;
@@ -139,7 +237,7 @@
      mutex_unlock(&s_audio_mutex);
  
      return CELL_OK;
-@@ -900,6 +972,18 @@
+@@ -900,6 +1060,18 @@
      if (!tag_ea)
          return CELL_AUDIO_ERROR_PARAM;
  
@@ -158,7 +256,7 @@
      mutex_lock(&s_audio_mutex);
      AudioPortSlot* port = &s_ports[portNum];
      u64 nblk = port->param.nBlock ? port->param.nBlock : 1;
-@@ -908,7 +992,16 @@
+@@ -908,7 +1080,17 @@
          return CELL_AUDIO_ERROR_PARAM;
      }
      u64 t = port->read_index + blockNo - (port->read_index % nblk);
@@ -167,6 +265,7 @@
 +     * Do not move it into the future: GetPortTimestamp must resolve its tag. */
 +    /* The title asks for the tag of the block it is about to fill: move the
 +     * published index on to the next one (see audio_fill_cursor). */
++    if (blockNo < 32) s_tag_us[portNum][blockNo] = ps3_system_time_us();
 +    if (audio_fill_cursor() && blockNo == port->write_index % nblk &&
 +        port->write_index + 1 < port->read_index + nblk) {
 +        port->write_index++;
@@ -176,7 +275,7 @@
      mutex_unlock(&s_audio_mutex);
  
      vm_write64(tag_ea, t);
-@@ -929,11 +1022,21 @@
+@@ -929,11 +1111,21 @@
  
      mutex_lock(&s_audio_mutex);
      u64 global_counter = s_ports[portNum].read_index;
@@ -238,7 +337,26 @@
      return CELL_OK;
  }
  
-@@ -573,11 +585,11 @@
+@@ -488,6 +500,18 @@
+         metrics->h_advance  = (float)advanceWidth * scale;
+         metrics->v_advance  = metrics->height;
+ 
++        /* FONT_METRICS_LOG=1: each (font slot, code) once, with what the
++         * title is told -- the basis of its line wrapping. */
++        { static int on = -1; if (on < 0) on = getenv("FONT_METRICS_LOG") ? 1 : 0;
++          if (on && code < 0x10000u) {
++              static unsigned char seen[8][0x10000 / 8];
++              const unsigned si = (unsigned)(slot - s_fonts) & 7u;
++              if (!(seen[si][code >> 3] & (1u << (code & 7)))) {
++                  seen[si][code >> 3] |= (unsigned char)(1u << (code & 7));
++                  fprintf(stderr, "[font-metrics] slot=%u code=U+%04X adv=%.2f width=%.2f bearX=%.2f scale_x=%.2f scale_y=%.2f\n",
++                          si, code, metrics->h_advance, metrics->width, metrics->h_bearing_x,
++                          slot->scale_x, slot->scale_y);
++              } } }
+         return CELL_OK;
+     }
+ #endif
+@@ -573,11 +597,11 @@
                  int sx = dx + col;
                  if (sx < 0 || sx >= hs.width) continue;
                  u8 alpha = bitmap[row * bw + col];
@@ -276,6 +394,41 @@
      { static int _once = 0;
        if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
      if (!s_pad_initialized)
+@@ -618,7 +619,7 @@
+      * LEFT 0x0080, RIGHT 0x0020, CROSS 0x4000, CIRCLE 0x2000, TRIANGLE 0x1000.
+      * Legit input simulation on the same footing as PAD_AUTOPRESS/PAD_STICK. */
+     { static int s_sc = -1;
+-      static struct { double t; unsigned mask; } ev[32]; static int n_ev = 0;
++      static struct { double t; unsigned mask; } ev[256]; static int n_ev = 0;   /* was 32: long tests ran out of presses */
+       static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
+       if (s_sc < 0) {
+           s_sc = 0;
+@@ -626,7 +627,7 @@
+           if (e && *e) {
+               s_sc = 1; t0 = GetTickCount64();
+               const char* p = e;
+-              while (*p && n_ev < 32) {
++              while (*p && n_ev < 256) {
+                   double t = strtod(p, (char**)&p);
+                   if (*p == ':') p++;
+                   unsigned m = (unsigned)strtoul(p, (char**)&p, 0);
+@@ -644,14 +645,14 @@
+            * happens. Fire on the first poll at or after the event time and
+            * hold it for a fixed number of polls, which is what a real press
+            * looks like regardless of poll rate. */
+-          static int fired[32], held[32];
++          static int fired[256], held[256];
+           for (int i = 0; i < n_ev; i++) {
+               if (!fired[i] && now >= ev[i].t) { fired[i] = 1; held[i] = 40; }
+               if (held[i] > 0) {
+                   held[i]--;
+                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(ev[i].mask & 0xFF);
+                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((ev[i].mask >> 8) & 0xFF);
+-                  static int said[32];
++                  static int said[256];
+                   if (!said[i]) { said[i] = 1;
+                       printf("[cellPad] PAD_SCRIPT t=%.1fs press 0x%04X\n", ev[i].t, ev[i].mask); }
+               }
 @@ -847,6 +848,7 @@
   * run off into the weeds before ever reaching gcm init. */
  s32 cellPadGetInfo(CellPadInfo2* info)
@@ -782,6 +935,27 @@
          if (SUCCEEDED(present_hr))
              ld_present_measure_record(g_ld_frames + 1u);
          else {
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -45,6 +45,7 @@
+ extern "C" void     vm_write32(uint64_t a, uint32_t v);
+ extern "C" void     vm_write64(uint64_t a, uint64_t v);
+ #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
++extern "C" uint64_t ps3_system_time_us(void);   /* guest clock, for the read log */
+ 
+ /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
+ extern "C" const char* ppu_vfs_root = ".";
+@@ -421,8 +422,8 @@
+       if (fd>=0 && fd<64) { per_fd[fd]+=n; cnt_fd[fd]++; }
+       int first_for_fd = (fd>=0 && fd<64 && cnt_fd[fd]==1);
+       if(_n++<50 || first_for_fd || getenv("FS_READ_ALL"))
+-        fprintf(stderr,"[fs] read fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
+-                fd,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
++        fprintf(stderr,"[fs] read t=%llums fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
++                (unsigned long long)(ps3_system_time_us()/1000),fd,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
+                 (unsigned long long)tot, first_for_fd?"  <= FIRST READ ON THIS FD":"");
+       if (getenv("FS_READ_PATH") && fd>=0 && fd<64 && g_fd_path[fd][0])
+           fprintf(stderr, "        from %s\n", g_fd_path[fd]);
 --- a/runtime/ppu/ppu_hle.cpp
 +++ b/runtime/ppu/ppu_hle.cpp
 @@ -658,8 +658,15 @@
@@ -976,7 +1150,104 @@
  /* sys_process_is_stack(u32 addr) -> 1 if addr is in the stack region. We model
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
-@@ -173,6 +173,10 @@
+@@ -23,6 +23,7 @@
+ #include <setjmp.h>
+ #ifndef _WIN32
+ #include <sched.h>   /* sched_yield */
++#include <unistd.h>  /* usleep */
+ #endif
+ #include <time.h>
+ #include "../platform/win32_compat.h"
+@@ -53,6 +54,88 @@
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+ #endif
++}
++
++/* GETLLAR idle backoff (SPU_LLAR_BACKOFF=0 disables).
++ *
++ * A job-queue worker with nothing to do scans its queue lines with GETLLAR and
++ * a compare that fails, forever. On hardware that SPU is otherwise idle; here
++ * it is a host thread, and every GETLLAR takes the global lock-line lock that
++ * the busy SPUs' DMA needs too. Imabikisou's spu_0003 workers did this on two
++ * threads during movies and the Sofdec decode SPUs ran 3-4x slower (55-90 ms a
++ * picture instead of ~17). A thread that keeps re-reading lines that have not
++ * changed, with no PUTLLC succeeding, sleeps a little; any change it sees or
++ * any commit it makes puts it straight back to full speed. */
++static SPU_THREAD_LOCAL unsigned t_llar_idle;
++static SPU_THREAD_LOCAL unsigned t_inmbox_idle;   /* see spu_inmbox_idle */
++static void spu_llar_backoff(uint32_t ea, const void* mem)
++{
++    static int s_on = -1;
++    if (s_on < 0) { const char* e = getenv("SPU_LLAR_BACKOFF"); s_on = !(e && *e == '0'); }
++    if (!s_on) return;
++    /* Last line content seen per EA (small direct-mapped table). */
++    static SPU_THREAD_LOCAL uint32_t t_ea[16];
++    static SPU_THREAD_LOCAL uint64_t t_sum[16];
++    static SPU_THREAD_LOCAL uint64_t t_since;
++    const uint64_t* q = (const uint64_t*)mem;
++    uint64_t s = 0;
++    for (int i = 0; i < 16; i++) s = (s ^ q[i]) * 0x100000001B3ull;
++    const unsigned k = (ea >> 7) & 15u;
++    if (t_ea[k] != ea || t_sum[k] != s) { t_ea[k] = ea; t_sum[k] = s; t_llar_idle = 0; return; }
++    if (++t_llar_idle < 256) return;
++    if (t_llar_idle == 256) { t_since = spu_host_ns(); return; }
++    if ((t_llar_idle & 63u) != 0) return;
++    /* Idle under 1 ms: yield; longer: give the core away. */
++    if (spu_host_ns() - t_since < 1000000ull) {
++#ifdef _WIN32
++        SwitchToThread();
++#else
++        sched_yield();
++#endif
++    } else {
++#ifdef _WIN32
++        Sleep(1);
++#else
++        usleep(500);
++#endif
++    }
++}
++
++/* SPU_TASKCPU=1: for a worker that takes its task from SigNotify1 and reports
++ * through the interrupt mailbox (Sofdec's decode SPUs), each task's wall time
++ * against the CPU time its host thread really ran. Equal: compute-bound. Wall
++ * far above CPU: the task waited on something. */
++static SPU_THREAD_LOCAL uint64_t t_task_ns, t_task_cpu;
++static int spu_taskcpu_on(void)
++{
++    static int s_on = -1;
++    if (s_on < 0) s_on = getenv("SPU_TASKCPU") ? 1 : 0;
++    return s_on;
++}
++static uint64_t spu_thread_cpu_ns(void)
++{
++#ifdef _WIN32
++    /* Cycles, not GetThreadTimes: that one only advances per scheduler
++     * quantum (15.6 ms). Reported as "cpu" in Mcycles. */
++    ULONG64 cyc = 0; QueryThreadCycleTime(GetCurrentThread(), &cyc);
++    return (uint64_t)cyc;
++#else
++    struct timespec ts; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++#endif
++}
++static void spu_taskcpu_begin(void)
++{
++    if (!spu_taskcpu_on()) return;
++    t_task_ns = spu_host_ns(); t_task_cpu = spu_thread_cpu_ns();
++}
++static void spu_taskcpu_end(spu_context* ctx)
++{
++    if (!spu_taskcpu_on() || !t_task_ns) return;
++    fprintf(stderr, "[spu-task] t=%llu spu=0x%X wall=%.2fms cpu=%.2fms\n",
++            (unsigned long long)(spu_host_ns() / 1000ull), ctx->spu_id,
++            (spu_host_ns() - t_task_ns) / 1e6, (spu_thread_cpu_ns() - t_task_cpu) / 1e6);
++    t_task_ns = 0;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -173,6 +256,10 @@
      fflush(stderr);
  }
  
@@ -987,7 +1258,7 @@
  /* SPU `stop` / stop-and-signal. A real SPU stop HALTS the core; the previous
   * lifted emission only did `status=...; return;`, which unwound ONE frame and
   * let the caller's service loop keep running -- so a SPURS policy doing
-@@ -193,6 +197,9 @@
+@@ -193,6 +280,9 @@
      static int s_halt = -1;
      if (s_halt < 0) s_halt = getenv("YDKJ_STOP_HALT") ? 1 : 0;
      ctx->status = SPU_STATUS_STOPPED_BY_STOP;
@@ -997,6 +1268,84 @@
      if (s_halt) spu_halt(ctx);
  }
  
+@@ -532,6 +622,7 @@
+       } }
+     switch (cmd) {
+     case MFC_GETLLAR_CMD:
++        spu_llar_backoff(ea, mem);
+         /* Lockstep tick: a guest GETLLAR..PUTLLC poll loop is intra-function
+          * (all gotos), so it never crosses the SPU_DRAIN tick site -- without a
+          * tick here a polling SPU would hold the run token forever while the
+@@ -692,6 +783,7 @@
+                                 n, ctx->image_id, (void*)ctx, ea,
+                                 w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); } } }
+             spu_coh_notify_write(ea);
++            t_llar_idle = 0;
+             ctx->atomic_stat = 0;                      /* PUTLLC_SUCCESS */
+         } else {
+             ctx->atomic_stat = 1;                      /* PUTLLC_FAILURE -> retry */
+@@ -793,6 +885,7 @@
+  * ===========================================================================*/
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+ {
++    t_inmbox_idle = 0;   /* channel traffic: the SPU is working, not idling */
+     /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
+      * worker that never issues an MFC command is either not being handed its
+      * work descriptor or is waiting on a channel we never satisfy; the channel
+@@ -860,6 +953,7 @@
+         { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_MBOXTRACE") ? 1 : 0;
+           if (s_t) fprintf(stderr, "[spu-mbox] INTR grp=0x%X spu=0x%X val=0x%08X\n",
+                            ctx->spu_group_id, ctx->spu_id, v); }
++        spu_taskcpu_end(ctx);
+         if (g_spu_user_event_hook && g_spu_user_event_hook(ctx, v)) break;
+         spu_channel_write(&ctx->ch_out_intr_mbox, v);
+         if (g_spu_out_mbox_hook) g_spu_out_mbox_hook(ctx->spu_group_id, ctx->spu_id, 1, v);
+@@ -1043,7 +1137,7 @@
+         if (ctx->rcv_evt_n > 0) { v = ctx->rcv_evt[ctx->rcv_evt_i++]; ctx->rcv_evt_n--; }
+         else v = spu_channel_read(&ctx->ch_in_mbox);
+         break;
+-    case SPU_RdSigNotify1:  v = spu_channel_read(&ctx->ch_sig_notify[0]); break;
++    case SPU_RdSigNotify1:  v = spu_channel_read(&ctx->ch_sig_notify[0]); spu_taskcpu_begin(); break;
+     case SPU_RdSigNotify2:  v = spu_channel_read(&ctx->ch_sig_notify[1]); break;
+     /* The decrementer must actually DECREMENT. Returning the latched WrDec
+      * value verbatim makes every `rdch $ch8` deadline poll spin forever: the
+@@ -1080,6 +1174,27 @@
+         break;
+     }
+     return spu_make_preferred_u32(v);
++}
++
++/* Idle inbound-mailbox poll backoff (SPU_INMBOX_BACKOFF=0 disables).
++ *
++ * Imabikisou's raw SPU 0 is a command loop: check two LS job slots, check
++ * rchcnt(RdInMbox), repeat. Idle, that is a host thread at 100% for nothing,
++ * one core the Sofdec decode SPUs no longer get. After a few thousand empty
++ * polls in a row with no other channel traffic in between, wait on the SPU's
++ * channel CV -- every mailbox write calls spu_ch_wake, so a command still
++ * wakes it at once; 1 ms caps the wait for anything that changes its LS. */
++static void spu_inmbox_idle(spu_context* ctx)
++{
++    static int s_on = -1;
++    if (s_on < 0) { const char* e = getenv("SPU_INMBOX_BACKOFF"); s_on = !(e && *e == '0'); }
++    if (!s_on || ++t_inmbox_idle < 4096) return;
++    if ((t_inmbox_idle & 255u) != 0) return;
++    AcquireSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
++    if (ctx->rcv_evt_n == 0 && ctx->ch_in_mbox.count == 0)
++        SleepConditionVariableSRW((CONDITION_VARIABLE*)&ctx->ch_wait_cv,
++                                  (SRWLOCK*)&ctx->ch_wait_lock, 1, 0);
++    ReleaseSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
+ }
+ 
+ /* ===========================================================================
+@@ -1236,6 +1351,8 @@
+             extern void spu_halt(spu_context*);
+             spu_halt(ctx);
+         }
++        if (ctx->rcv_evt_n == 0 && ctx->ch_in_mbox.count == 0) spu_inmbox_idle(ctx);
++        else t_inmbox_idle = 0;
+         return (uint32_t)ctx->rcv_evt_n + ctx->ch_in_mbox.count;           /* readable */
+     /* Free slots, CLAMPED. The queue behind each channel is SPU_CHANNEL_CAP
+      * deep -- deeper than the hardware depth reported here -- so `count` can
 --- a/runtime/spu/spu_coherency.c
 +++ b/runtime/spu/spu_coherency.c
 @@ -33,22 +33,14 @@
@@ -1030,6 +1379,144 @@
  #else
  #include <stdatomic.h>
  static atomic_flag g_lockline = ATOMIC_FLAG_INIT;
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -475,7 +475,10 @@
+ #define SPU_LS_FAST 1
+ #endif
+ 
+-/* Debug probes of spu_ls_read128, out of line: inlined they kept every LS
++/* SPU_LS_NOPROBE (per-TU define): no probe or watch in the LS accessors below,
++ * so a title's hot decode loops compile to plain loads and stores.
++ *
++ * Debug probes of spu_ls_read128, out of line: inlined they kept every LS
+  * load a real call (~10% of GH3's FMOD mixer task). g_spu_ls_probe is -1
+  * until the first call reads SPU_LS_LOWREAD, then 0/1. */
+ 
+@@ -533,12 +536,16 @@
+ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+ {
+     u128 v;
++#ifndef SPU_LS_NOPROBE
+     if (__builtin_expect(g_spu_ls_probe != 0, 0) || (ctx->image_id == 2 && ctx->policy_mode))
+         spu_ls_read_probe(ctx, lsa);
++#endif
+     lsa &= SPU_LS_MASK & ~0xFu;
+     const uint8_t* p = &ctx->ls[lsa];
++#ifndef SPU_LS_NOPROBE
+     spu_ls_watch_hit2(lsa, 0, p, (uint32_t)ctx->pc & SPU_LS_MASK,
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
++#endif
+ #if SPU_LS_FAST
+     uint32_t w0, w1, w2, w3;
+     memcpy(&w0, p,      4); memcpy(&w1, p + 4,  4);
+@@ -619,8 +626,10 @@
+      * why it resolves to an empty buffer: the resolved address, the whole
+      * bufferSetArray (0xDF0), and the live loadCommands (0xC00) whose RunJob
+      * command (commandNum==5) names the code buffer set. */
++#ifndef SPU_LS_NOPROBE
+     if (lsa == 0x1320 && ctx->image_id == 2 && ctx->policy_mode)
+         spu_ls_write_probe_pre(ctx, lsa, val);
++#endif
+ #if SPU_LS_FAST
+     uint32_t w0 = SPU_BSWAP32(val._u32[0]), w1 = SPU_BSWAP32(val._u32[1]);
+     uint32_t w2 = SPU_BSWAP32(val._u32[2]), w3 = SPU_BSWAP32(val._u32[3]);
+@@ -635,10 +644,12 @@
+         p[i*4 + 3] = (uint8_t)w;
+     }
+ #endif
++#ifndef SPU_LS_NOPROBE
+     spu_ls_watch_hit2(lsa, 1, p, (uint32_t)ctx->pc & SPU_LS_MASK,
+                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
+     if (__builtin_expect(g_spu_smc_watch != 0, 0))
+         spu_ls_write_probe_smc(ctx, lsa, p);
++#endif
+ }
+ 
+ /* ---------------------------------------------------------------------------
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -186,18 +186,23 @@
+  * as the byte loop). SPU byte P lives at host byte SPU_W(P), i.e. the bytes
+  * of each 32-bit word reversed, so swap into SPU order, select, swap back. */
+ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
+-    const __m128i sw = _mm_setr_epi8(3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12);
++    /* No byte swaps: SPU byte P is host byte SPU_W(P) = P ^ 3 (within 0..15),
++     * and the control, the sources and the result share that layout, so
++     * host result byte h = source host byte (control[h] ^ 3) & 15 -- of b if
++     * control bit 4 is set. Saves four pshufb per shufb, the decode SPUs'
++     * commonest instruction (Sofdec's IDCT runs one per register load). */
+     __m128i A, B, C; memcpy(&A, &a, 16); memcpy(&B, &b, 16); memcpy(&C, &c, 16);
+-    A = _mm_shuffle_epi8(A, sw); B = _mm_shuffle_epi8(B, sw); C = _mm_shuffle_epi8(C, sw);
+-    const __m128i idx = _mm_and_si128(C, _mm_set1_epi8(0x0F));
++    const __m128i idx = _mm_and_si128(_mm_xor_si128(C, _mm_set1_epi8(3)), _mm_set1_epi8(0x0F));
+     const __m128i fromb = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8(0x10)), _mm_set1_epi8(0x10));
+     __m128i r = _mm_blendv_epi8(_mm_shuffle_epi8(A, idx), _mm_shuffle_epi8(B, idx), fromb);
+-    /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
+-    const __m128i m80 = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8((char)0x80)), _mm_set1_epi8((char)0x80));
+-    const __m128i mC0 = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8((char)0xC0)), _mm_set1_epi8((char)0xC0));
+-    const __m128i mE0 = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8((char)0xE0)), _mm_set1_epi8((char)0xE0));
+-    const __m128i special = _mm_blendv_epi8(mC0, _mm_set1_epi8((char)0x80), mE0);
+-    r = _mm_shuffle_epi8(_mm_blendv_epi8(r, special, m80), sw);
++    /* Special selectors (bit 7 set): 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80.
++     * Rare in practice, so only paid for when a control byte has bit 7. */
++    if (_mm_movemask_epi8(C)) {
++        const __m128i mC0 = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8((char)0xC0)), _mm_set1_epi8((char)0xC0));
++        const __m128i mE0 = _mm_cmpeq_epi8(_mm_and_si128(C, _mm_set1_epi8((char)0xE0)), _mm_set1_epi8((char)0xE0));
++        const __m128i special = _mm_blendv_epi8(mC0, _mm_set1_epi8((char)0x80), mE0);
++        r = _mm_blendv_epi8(r, special, C);   /* blendv keys on bit 7 of each control byte */
++    }
+     u128 out; memcpy(&out, &r, 16); return out;
+ }
+ /* The byte loop stays as the reference (tests/test_spu_shufb.c checks both). */
+@@ -279,12 +284,45 @@
+ 
+ /* RI8 scale: float-to-int uses 2^(173-i8), int-to-float 2^(i8-155).
+  * The canonical immediates 173 and 155 are identity conversions. */
+-static inline u128 spu_cflts(u128 a, int i8){ u128 r; double f=exp2((double)(173-i8));
++static inline u128 spu_cflts_ref(u128 a, int i8){ u128 r; double f=exp2((double)(173-i8));
+     for(int i=0;i<4;i++){ double v=(double)a._f32[i]*f; if(v>2147483647.0)v=2147483647.0; if(v<-2147483648.0)v=-2147483648.0; r._s32[i]=(int32_t)v; } return r; }
++#if defined(__SSE4_1__)
++/* Four lanes at once. Scaling by a power of two is exact in float while the
++ * factor itself is a normal float; cvttps gives 0x80000000 for anything out
++ * of range (and NaN, as the scalar cast does), and the positive overflows
++ * are flipped to 0x7FFFFFFF. */
++static inline u128 spu_cflts(u128 a, int i8){
++    const int k = 173 - i8;
++    if (k < -126 || k > 127) return spu_cflts_ref(a, i8);
++    union { uint32_t u; float f; } sc; sc.u = (uint32_t)(k + 127) << 23;
++    __m128 v; memcpy(&v, &a, 16);
++    v = _mm_mul_ps(v, _mm_set1_ps(sc.f));
++    __m128i t = _mm_cvttps_epi32(v);
++    t = _mm_xor_si128(t, _mm_castps_si128(_mm_cmpge_ps(v, _mm_set1_ps(2147483648.0f))));
++    u128 r; memcpy(&r, &t, 16); return r;
++}
++#else
++#define spu_cflts spu_cflts_ref
++#endif
+ static inline u128 spu_cfltu(u128 a, int i8){ u128 r; double f=exp2((double)(173-i8));
+     for(int i=0;i<4;i++){ double v=(double)a._f32[i]*f; if(v<0)v=0; if(v>4294967295.0)v=4294967295.0; r._u32[i]=(uint32_t)v; } return r; }
+-static inline u128 spu_csflt(u128 a, int i8){ u128 r; double f=exp2((double)(i8-155));
++static inline u128 spu_csflt_ref(u128 a, int i8){ u128 r; double f=exp2((double)(i8-155));
+     for(int i=0;i<4;i++) r._f32[i]=(float)((double)a._s32[i]*f); return r; }
++#if defined(__SSE4_1__)
++/* One rounding (int -> float), then an exact power-of-two scale: identical to
++ * the double path while every result stays a normal float, which |k| <= 100
++ * guarantees for 32-bit inputs. */
++static inline u128 spu_csflt(u128 a, int i8){
++    const int k = i8 - 155;
++    if (k < -100 || k > 100) return spu_csflt_ref(a, i8);
++    union { uint32_t u; float f; } sc; sc.u = (uint32_t)(k + 127) << 23;
++    __m128i t; memcpy(&t, &a, 16);
++    __m128 v = _mm_mul_ps(_mm_cvtepi32_ps(t), _mm_set1_ps(sc.f));
++    u128 r; memcpy(&r, &v, 16); return r;
++}
++#else
++#define spu_csflt spu_csflt_ref
++#endif
+ static inline u128 spu_cuflt(u128 a, int i8){ u128 r; double f=exp2((double)(i8-155));
+     for(int i=0;i<4;i++) r._f32[i]=(float)((double)a._u32[i]*f); return r; }
+ static inline u128 spu_fm(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._f32[i]=a._f32[i]*b._f32[i]; return r; }
 --- a/runtime/spu/spu_lifted_thread.c
 +++ b/runtime/spu/spu_lifted_thread.c
 @@ -2,6 +2,7 @@
@@ -1179,7 +1666,29 @@
  } spu_thread_t;
  
  typedef struct {
-@@ -610,6 +618,7 @@
+@@ -537,8 +545,19 @@
+ 
+     vm_write_be32(out_ea, g->id);
+ 
+-    fprintf(stderr, "[SPU] group_create -> id=0x%X num=%u prio=%d type=0x%X name=%.31s\n",
+-            g->id, num, prio, gtype, g->name);
++    fprintf(stderr, "[SPU] group_create -> id=0x%X num=%u prio=%d type=0x%X name=%.31s lr=0x%08X\n",
++            g->id, num, prio, gtype, g->name, (uint32_t)ctx->lr);
++    /* SPU_GROUP_STACK=1: the guest return addresses on the stack -- which
++     * library call created the group, and with what thread count. */
++    if (getenv("SPU_GROUP_STACK") && vm_base) {
++        uint32_t sp = (uint32_t)ctx->gpr[1];
++        fprintf(stderr, "[SPU]   stack RAs:");
++        for (uint32_t i = 0, n = 0; i < 0x400 && n < 16; i += 4) {
++            uint32_t w = vm_read_be32(sp + i);
++            if (w >= 0x10000u && w < 0x3A0000u && !(w & 3)) { fprintf(stderr, " %08X", w); n++; }
++        }
++        fprintf(stderr, "\n");
++    }
+     fflush(stderr);
+     ctx->gpr[3] = 0;
+     return 0;
+@@ -610,6 +629,7 @@
       * sys_spu_image layout: type/entry/segs/nsegs — entry at +4. */
      if (img_ea) t->entry_point = vm_read_be32(img_ea + 4);
      t->img_ea    = img_ea;
@@ -1187,7 +1696,7 @@
      t->args_ea   = args_ea;
      t->args_size = 0;  /* not known until decoder reads it; sys_spu_thread_args is 32 B */
      /* lv2 copy semantics: take the four u64s now (see spu_thread_t.args). */
-@@ -710,7 +719,8 @@
+@@ -710,7 +730,8 @@
  #endif
  {
  #ifdef _WIN32
@@ -1197,7 +1706,7 @@
  #endif
      spu_thread_t* t = (spu_thread_t*)arg;
      spu_lifted_thread_result r;
-@@ -749,7 +759,8 @@
+@@ -749,7 +770,8 @@
  #endif
  {
  #ifdef _WIN32
@@ -1207,7 +1716,7 @@
  #endif
      spu_thread_t* t = (spu_thread_t*)arg;
      int32_t rc = 0;
-@@ -1012,6 +1023,7 @@
+@@ -1012,6 +1034,7 @@
                  d.group_id = id;
                  d.entry    = t->entry_point;
                  d.img_ea   = t->img_ea;
@@ -1215,7 +1724,7 @@
                  for (int a = 0; a < 4; a++) d.args[a] = t->args[a];
                  spu_lifted_thread_setup(t->sctx, &d);
                  t->running = 1;
-@@ -1643,6 +1655,16 @@
+@@ -1643,6 +1666,16 @@
              spu_group_t* group = spu_find_group(spu->spu_group_id);
              if (group) queue = group->user_event_ports[port];
              ReleaseSRWLockShared(&s_spu_port_lock);
@@ -1232,7 +1741,7 @@
          }
          result = CELL_ENOTCONN;
          if (queue) {
-@@ -1650,6 +1672,14 @@
+@@ -1650,6 +1683,14 @@
                  spu->spu_id, ((uint64_t)port << 32) | (value & 0xFFFFFFu), data);
              result = rc == 0 ? CELL_OK : CELL_EBUSY;
          }
@@ -1247,7 +1756,7 @@
      }
      if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);
      return 1;
-@@ -1711,6 +1741,11 @@
+@@ -1711,6 +1752,11 @@
       * the group's connected queue. */
      uint32_t q = 0;
      spu_thread_t* t = spu_find_thread(spu_id);
@@ -1259,7 +1768,7 @@
      /* lv2 encodes the destination SPU PORT in the top byte of the word an SPU
       * sends to the PPU: MultiStream's completion word 0x2A000001 is port 0x2A,
       * which is the queue it bound with connect_event(..., spup=0x2A). Route on
-@@ -2326,6 +2361,10 @@
+@@ -2326,6 +2372,10 @@
              fprintf(stderr, "[SPU] write_snr tid=0x%X snr%u <- 0x%08X (%s)\n",
                      tid, num + 1, val, or_mode ? "OR" : "overwrite");
              fflush(stderr); } }
@@ -1270,7 +1779,7 @@
      }
      ctx->gpr[3] = 0;
      return 0;
-@@ -2383,6 +2422,103 @@
+@@ -2383,6 +2433,103 @@
      (void)ctx;
      ctx->gpr[3] = 0;
      return 0;
@@ -1374,7 +1883,7 @@
  }
  
  
-@@ -2515,6 +2651,8 @@
+@@ -2515,6 +2662,8 @@
      lv2_syscall_register(tbl, SYS_SPU_THREAD_CONNECT_EVENT,   sys_spu_thread_connect_event_handler);
      { extern void (*g_spu_out_mbox_hook)(uint32_t,uint32_t,int,uint32_t);
        g_spu_out_mbox_hook = ydkj_spu_out_mbox_deliver; }
@@ -1383,7 +1892,7 @@
      { extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
        g_spu_user_event_hook = spu_deliver_user_event; }
      lv2_syscall_register(tbl, SYS_SPU_THREAD_DISCONNECT_EVENT,sys_spu_thread_stub);
-@@ -2526,8 +2664,8 @@
+@@ -2526,8 +2675,8 @@
      lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);

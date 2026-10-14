@@ -171,13 +171,14 @@ add_executable(${PROJECT_NAME}
 # changes the compile command of every lifted PPU TU, and those are large enough
 # that the needless rebuild is measured in tens of minutes.
 #   SPU_USE_DISPATCH_MT -- route SPU_IB_DISPATCH through the musttail path.
+#   SPU_LS_NOPROBE      -- LS loads/stores without the debug probes and watches.
 #   -O2                 -- the target-wide -O1 exists for the huge PPU TUs; the
 #                          SPU sources are small and decode-hot, so they get
 #                          full optimization. The last -O on the line wins.
 if(SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
-        COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
+        COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_NOPROBE")
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         # AVX2 (with FMA and SSE4.1): spu_helpers.h's shufb has a pshufb path
         # behind __SSE4_1__ and its fma/fms are fmaf(). At the default SSE2 the
