@@ -1,6 +1,6 @@
 # Native PC port integration
 
-This is the hand-maintained integration layer for the ps3recomp-based Imabikisō port. It is separate from the earlier `imbk_player` executable. The local development build reaches the opening and classroom, but audio/movie issues remain.
+This is the hand-maintained integration layer for the ps3recomp-based Imabikisō port. It runs locally recompiled original game code; it does not use a custom replacement engine. The local development build reaches the opening and classroom, but audio/movie issues remain.
 
 ## Source-only prerequisites
 

@@ -35,24 +35,12 @@ if(NOT WIN32)
   target_link_libraries(imbk_core PUBLIC Iconv::Iconv)
 endif()
 
-add_library(imbk_engine
-  src/engine/image.cpp
-  src/engine/player.cpp
-)
-target_link_libraries(imbk_engine PUBLIC imbk_core)
-
 add_executable(imbk src/tools/imbk.cpp)
 target_link_libraries(imbk PRIVATE imbk_core)
-
-# Prototype player (Windows/GDI for now; the engine itself is platform independent).
-if(WIN32)
-  add_executable(imbk_player src/player/main_win32.cpp)
-  target_link_libraries(imbk_player PRIVATE imbk_engine gdi32 user32)
-endif()
 
 include(CTest)
 if(BUILD_TESTING)
   add_executable(imbk_tests tests/tests.cpp)
-  target_link_libraries(imbk_tests PRIVATE imbk_engine)
+  target_link_libraries(imbk_tests PRIVATE imbk_core)
   add_test(NAME imbk_tests COMMAND imbk_tests)
 endif()

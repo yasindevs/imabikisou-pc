@@ -16,6 +16,8 @@ An independent, community-led project built with [ps3recomp](https://github.com/
 
 Imabikisō is a Japanese horror visual novel from Chunsoft. This project explores running the PS3 release **BLJM60042 / 01.00** as a native PC program through static recompilation, alongside tools for extracting, understanding and patching its scripts.
 
+**The port uses the original game's code recompiled through ps3recomp.** The earlier custom C++ engine experiment was abandoned and is no longer part of the current source tree. The goal is to preserve the original engine and behavior; complete fidelity has not yet been achieved or verified. The remaining C++ archive/script tools support extraction and translation rather than replacing the game engine.
+
 The current prototype boots, renders the opening and reaches the first classroom narration. A separate English preview replaces some menus and opening text. **This is an experimental developer build, not a finished port or a verified full playthrough.**
 
 No game executable, generated game code, disc image, fonts, sound or video is included. You need your own game dump and locally generated files to build and run the native port.
@@ -86,7 +88,7 @@ The intended workflow is to translate by stable script ID, preserve control inst
 
 | Directory | Contents |
 |---|---|
-| [`src/`](src/) | C++ archive, script and translation tools; an earlier linear player prototype |
+| [`src/`](src/) | Supporting C++ archive, script and translation tools |
 | [`native/`](native/) | Native port runner, ABI bridges and CMake integration |
 | [`patches/ps3recomp/`](patches/ps3recomp/) | Local runtime/lifter fixes against a pinned upstream commit |
 | [`translations/`](translations/) | English draft text and workflow |
@@ -110,7 +112,7 @@ imbk unpack "Imabikisou (Japan).iso" out/disc
 imbk patch "Imabikisou (Japan).iso" out/translation.tsv out/disc
 ```
 
-These commands build the tools, **not the native game executable**. `imbk_player` is the earlier linear prototype and is distinct from the ps3recomp-based port.
+These commands build the supporting tools, **not the native game executable**. The native game uses the ps3recomp integration below; there is no custom replacement-engine target.
 
 ### Build the native port
 
