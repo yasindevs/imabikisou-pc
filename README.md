@@ -8,7 +8,7 @@ An independent, community-led project built with [ps3recomp](https://github.com/
 
 **Windows prototype · Early scenes running · English preview · Work in progress**
 
-[Progress](#progress) · [What works](#what-works-today) · [Build & source](#code-and-building) · [English translation](#english-machine-translation) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
+[Screenshots](#screenshots) · [Progress](#progress) · [What works](#what-works-today) · [Build & source](#code-and-building) · [English translation](#english-machine-translation) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -19,6 +19,22 @@ Imabikisō is a Japanese horror visual novel from Chunsoft. This project explore
 The current prototype boots, renders the opening and reaches the first classroom narration. A separate English preview replaces some menus and opening text. **This is an experimental developer build, not a finished port or a verified full playthrough.**
 
 No game executable, generated game code, disc image, fonts, sound or video is included. You need your own game dump and locally generated files to build and run the native port.
+
+## Screenshots
+
+Actual captures from the native PC prototype, showing the **English machine-translation draft**. The title logo remains Japanese. Captured on 14 October 2026; click an image for the full 1280 × 720 PNG.
+
+| English title menu | Opening prologue |
+|:---:|:---:|
+| [![Title screen with New Game and Continue in English](docs/screenshots/01-english-menu.png)](docs/screenshots/01-english-menu.png) | [![Opening scene displaying Why me in English](docs/screenshots/02-prologue-why-me.png)](docs/screenshots/02-prologue-why-me.png) |
+| **New Game / Continue** | **“Why me……?”** |
+
+| Prologue narration | First classroom text |
+|:---:|:---:|
+| [![Prologue displaying A hallucination. It has to be.](docs/screenshots/03-prologue-hallucination.png)](docs/screenshots/03-prologue-hallucination.png) | [![School scene with the first classroom narration in English](docs/screenshots/04-classroom-english.png)](docs/screenshots/04-classroom-english.png) |
+| **“A hallucination. It has to be.”** | **First classroom narration rendered in English** |
+
+[Full-resolution gallery and captions](docs/screenshots/README.md). These stills show rendering and text only; audio interruptions and movie stutters remain.
 
 ## Progress
 
@@ -121,5 +137,7 @@ Special thanks to **sp00nznet and the ps3recomp contributors** for the recompila
 ## License and game files
 
 Project code is MIT-licensed; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Imabikisō and its content belong to their respective rights holders. This is an unofficial project with no affiliation or endorsement.
+
+The gameplay screenshots document the prototype. The underlying game artwork and logo remain the property of their respective rights holders and are not covered by the project's MIT code license.
 
 Please do not upload game files, extracted assets, complete script dumps or generated game sources to issues or pull requests.
