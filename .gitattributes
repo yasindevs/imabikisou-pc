@@ -1,3 +1,5 @@
 * text=auto eol=lf
 *.bat text eol=crlf
 *.ps1 text eol=crlf
+# Unified-diff context lines contain a significant leading space.
+*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof

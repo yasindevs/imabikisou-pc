@@ -1,0 +1,1556 @@
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -126,7 +126,27 @@
+     /* For address reporting to guest */
+     u64                  port_addr;      /* guest-visible buffer address */
+     u64                  read_idx_addr;  /* guest-visible read index address */
++    u64                  last_mix_us;    /* guest system time of the last consumed block */
+ } AudioPortSlot;
++
++/* The guest's sys_time_get_system_time clock (ppu_sysprx.cpp). */
++extern uint64_t ps3_system_time_us(void);
++
++/* AUDIO_FILL_CURSOR=1: publish a FILL cursor at readIndexAddr instead of the
++ * raw read position. A libmixer-style producer reads that index when it
++ * handles a notify event and fills the block it names; on a host its handling
++ * (two SPU round trips per block here) sometimes runs past the next period, so
++ * two queued events read the same index: one block filled twice, the next not
++ * at all -- Imabikisou played every other block as silence. The cursor starts
++ * two blocks ahead of the reader and advances each time the title asks for the
++ * tag of the block it names (cellAudioGetPortBlockTag), so back-to-back events
++ * fill consecutive blocks; it never runs a full ring ahead of the reader. */
++static int audio_fill_cursor(void)
++{
++    static int v = -1;
++    if (v < 0) { const char* e = getenv("AUDIO_FILL_CURSOR"); v = (e && *e && *e != '0') ? 1 : 0; }
++    return v;
++}
+ 
+ static int            s_audio_initialized = 0;
+ static AudioPortSlot  s_ports[CELL_AUDIO_PORT_MAX];
+@@ -359,7 +379,14 @@
+     BYTE* buf = NULL;
+     HRESULT hr = s_wasapi_render->lpVtbl->GetBuffer(s_wasapi_render, num_samples, &buf);
+     if (SUCCEEDED(hr) && buf) {
+-        memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
++        /* Diagnostic mute preserves the device clock and the recorded mix. */
++        static int host_mute = -1;
++        if (host_mute < 0) {
++            const char* e = getenv("AUDIO_HOST_MUTE");
++            host_mute = e && *e && *e != '0';
++        }
++        if (host_mute) memset(buf, 0, num_samples * 2 * sizeof(float));
++        else memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
+         s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples, 0);
+     }
+ }
+@@ -443,8 +470,20 @@
+         if (level <= 0.0f) level = 1.0f;
+         if (level > 1.0f) level = 1.0f;
+ 
+-        /* Read one block at the current read_index */
+-        u32 block_idx = (u32)(port->read_index % nblock);
++        /* Read one block at the current read_index.
++         *
++         * AUDIO_LAG_BLOCKS=<n>: read n blocks behind the published index. A
++         * producer that fills the block the index points at, just in time
++         * (Imabikisou's statically linked libmixer: notify -> PPU thread ->
++         * CRI SPU renderer -> DMA), gets one 5.3 ms period on hardware; on a
++         * host its wake-up chain is slower and every other block was read
++         * before it landed -- half the output silent, the sound choppy. The
++         * lag adds n periods of latency and gives the producer n+1. */
++        static int s_lag = -1;
++        if (s_lag < 0) { const char* e = getenv("AUDIO_LAG_BLOCKS"); s_lag = e ? atoi(e) : 0;
++                         if (s_lag < 0) s_lag = 0; }
++        u32 lag = (u32)s_lag < nblock ? (u32)s_lag : nblock - 1;
++        u32 block_idx = (u32)((port->read_index + nblock - lag) % nblock);
+         u32 block_offset = block_idx * CELL_AUDIO_BLOCK_SAMPLES * nch;
+         float* src = port->buffer + block_offset;
+ 
+@@ -453,7 +492,12 @@
+          * writes" from "writer and reader cycle out of phase". */
+         { static int s_pk = -1; if (s_pk < 0) s_pk = getenv("AUDIO_PEAK") ? 1 : 0;
+           if (s_pk) { static _Thread_local unsigned _c;
+-            if ((++_c % 400) == 0) {
++            /* AUDIO_PEAK_BURST=<n>: every block for n blocks after block 4000,
++             * instead of one in 400 -- the phase between writer and reader. */
++            static int s_burst = -1;
++            if (s_burst < 0) { const char* e = getenv("AUDIO_PEAK_BURST"); s_burst = e ? atoi(e) : 0; }
++            ++_c;
++            if (s_burst ? (_c >= 4000 && _c < 4000u + (unsigned)s_burst) : (_c % 400) == 0) {
+                 char map[36]; u32 b;
+                 for (b = 0; b < nblock && b < 32; b++) {
+                     const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
+@@ -493,6 +537,19 @@
+             s_mix_buffer[s * 2 + 1] += right;
+         }
+ 
++        { static int s_b = -1; static unsigned s_k;
++          if (s_b < 0) { const char* e = getenv("AUDIO_PEAK_BURST"); s_b = e ? atoi(e) : 0; }
++          if (s_b && ++s_k >= 4000 && s_k < 4000u + (unsigned)s_b) {
++              unsigned nzs = 0, nzm = 0;
++              for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * nch; i++) if (src[i] != 0.0f) nzs++;
++              for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) nzm++;
++              { unsigned chm = 0, lo = 0xFFFFFFFFu, hi = 0;
++                for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * nch; i++) if (src[i] != 0.0f) {
++                    chm |= 1u << (i % nch); if (i / nch < lo) lo = i / nch; if (i / nch > hi) hi = i / nch; }
++                fprintf(stderr, "[audio-blk]   channels=0x%02X samples %u..%u\n", chm, lo, hi); }
++              fprintf(stderr, "[audio-blk] k=%u port=%d blk=%u nch=%u src_nonzero=%u mix_nonzero=%u level=%.3f\n",
++                      s_k, p, block_idx, nch, nzs, nzm, level);
++          } }
+         /* Firmware clears a ring-buffer block after consuming it. Besides
+          * preventing stale PCM from replaying when a producer stalls, the
+          * cleared block is an observable consumption signal for producers. */
+@@ -502,7 +559,14 @@
+          * ring slot to the guest. SurMixer multiplies this value by the block
+          * size directly; an unbounded counter walks beyond the audio buffer. */
+         port->read_index++;
+-        if (port->read_idx_addr)
++        port->last_mix_us = ps3_system_time_us();
++        if (audio_fill_cursor()) {
++            /* A producer that fell behind does not get to fill blocks already
++             * gone; it resumes one block ahead of the reader. */
++            if (port->write_index < port->read_index + 1) port->write_index = port->read_index + 1;
++            if (port->read_idx_addr)
++                vm_write64((u32)port->read_idx_addr, port->write_index % nblock);
++        } else if (port->read_idx_addr)
+             vm_write64((u32)port->read_idx_addr, port->read_index % nblock);
+     }
+ 
+@@ -538,6 +602,7 @@
+ static unsigned __stdcall audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
++    if (getenv("AUDIO_HOST_PRIORITY")) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+     printf("[cellAudio] Mixing thread started\n");
+ 
+     /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
+@@ -863,6 +928,13 @@
+ 
+     mutex_lock(&s_audio_mutex);
+     s_ports[portNum].running = 1;
++    if (audio_fill_cursor()) {
++        AudioPortSlot* port = &s_ports[portNum];
++        u64 nblk = port->param.nBlock ? port->param.nBlock : 1;
++        port->write_index = port->read_index + (nblk > 2 ? 2 : 1);   /* two blocks of headroom */
++        if (port->read_idx_addr)
++            vm_write64((u32)port->read_idx_addr, port->write_index % nblk);
++    }
+     mutex_unlock(&s_audio_mutex);
+ 
+     return CELL_OK;
+@@ -900,6 +972,18 @@
+     if (!tag_ea)
+         return CELL_AUDIO_ERROR_PARAM;
+ 
++    /* AUDIO_RATE=1: how often the title asks for a block tag -- for a libmixer
++     * title that is once per block it actually mixes. */
++    { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
++      if (on) { static unsigned long long t0; static unsigned n; static u64 lastb = ~0ull; static unsigned same;
++        unsigned long long now = ps3_system_time_us(); if (!t0) t0 = now; n++;
++        if (blockNo == lastb) same++; lastb = blockNo;
++        if (now - t0 >= 5000000ull) {
++            fprintf(stderr, "[audio-tag] %.1f GetPortBlockTag/s (same block as previous: %u) last blockNo=%llu ridx=%llu\n",
++                    n * 1e6 / (double)(now - t0), same, (unsigned long long)blockNo,
++                    (unsigned long long)s_ports[portNum].read_index);
++            n = 0; same = 0; t0 = now; } } }
++
+     mutex_lock(&s_audio_mutex);
+     AudioPortSlot* port = &s_ports[portNum];
+     u64 nblk = port->param.nBlock ? port->param.nBlock : 1;
+@@ -908,7 +992,16 @@
+         return CELL_AUDIO_ERROR_PARAM;
+     }
+     u64 t = port->read_index + blockNo - (port->read_index % nblk);
+-    if (blockNo < port->read_index % nblk) t += nblk;
++    /* A slot before cur_pos belongs to this ring cycle and has already played.
++     * Do not move it into the future: GetPortTimestamp must resolve its tag. */
++    /* The title asks for the tag of the block it is about to fill: move the
++     * published index on to the next one (see audio_fill_cursor). */
++    if (audio_fill_cursor() && blockNo == port->write_index % nblk &&
++        port->write_index + 1 < port->read_index + nblk) {
++        port->write_index++;
++        if (port->read_idx_addr)
++            vm_write64((u32)port->read_idx_addr, port->write_index % nblk);
++    }
+     mutex_unlock(&s_audio_mutex);
+ 
+     vm_write64(tag_ea, t);
+@@ -929,11 +1022,21 @@
+ 
+     mutex_lock(&s_audio_mutex);
+     u64 global_counter = s_ports[portNum].read_index;
++    u64 last = s_ports[portNum].last_mix_us;
+     mutex_unlock(&s_audio_mutex);
+     if (tag > global_counter)
+         return CELL_AUDIO_ERROR_TAG_NOT_FOUND;
+ 
+-    u64 t = s_audio_start_us + tag * 256000000ULL / 48000ULL;
++    /* When block `tag` was (or is due to be) consumed, on the guest's own
++     * sys_time_get_system_time clock and anchored to the last block the mixer
++     * actually consumed. This used to be cellAudioInit's absolute QPC time plus
++     * tag * 5.33 ms: a different origin from the guest clock (hours ahead) and
++     * blind to the device-paced mixer's real progress. Imabikisou's libmixer
++     * schedules its blocks from these stamps and mixed only ~100 of the 187.5
++     * blocks a second -- every other block of its output was silence. */
++    if (!last) last = ps3_system_time_us();
++    u64 back = (global_counter - tag) * 256000000ULL / 48000ULL;
++    u64 t = last > back ? last - back : 0;
+     vm_write64(stamp_ea, t);
+     return CELL_OK;
+ }
+--- a/libs/font/cellFont.c
++++ b/libs/font/cellFont.c
+@@ -270,7 +270,6 @@
+ 
+ s32 cellFontOpenFontMemory(CellFont* font, const void* data, u32 dataSize, u32 subNum, s32 uniqueId)
+ {
+-    (void)subNum;
+     (void)uniqueId;
+     printf("[cellFont] OpenFontMemory(size=%u)\n", dataSize);
+ 
+@@ -286,7 +285,7 @@
+ 
+ #if FONT_HAS_STB
+     if (stbtt_InitFont(&slot->stb_info, slot->font_data,
+-                       stbtt_GetFontOffsetForIndex(slot->font_data, 0))) {
++                       stbtt_GetFontOffsetForIndex(slot->font_data, (int)subNum))) {
+         slot->stb_valid = 1;
+     } else {
+         slot->stb_valid = 0;
+@@ -295,6 +294,19 @@
+ 
+     font_store(font, (u32)(slot - s_fonts), 0, 1.0f, 1.0f);
+ 
++    return CELL_OK;
++}
++
++// Instances share the borrowed font bytes, but own their scale and renderer state.
++s32 cellFontOpenFontInstance(CellFont* source, CellFont* font)
++{
++    FontSlot* original = font_get_slot(source);
++    if (!font || !original) return CELL_FONT_ERROR_INVALID_PARAMETER;
++    FontSlot* slot = font_alloc_slot();
++    if (!slot) return CELL_FONT_ERROR_ALLOCATION_FAILED;
++    *slot = *original;
++    slot->font_data_owned = 0;
++    font_store(font, (u32)(slot - s_fonts), slot->type, slot->scale_x, slot->scale_y);
+     return CELL_OK;
+ }
+ 
+@@ -573,11 +585,11 @@
+                 int sx = dx + col;
+                 if (sx < 0 || sx >= hs.width) continue;
+                 u8 alpha = bitmap[row * bw + col];
+-                if (alpha > 0) {
+-                    int offset = sy * hs.widthByte + sx * hs.pixelSizeByte;
+-                    /* Alpha-blend (simple overwrite for alpha-only surface) */
+-                    hs.buffer[offset] = alpha;
+-                }
++                // This is a glyph alpha image, not compositing into a scene.
++                // Transparent pixels must overwrite the previous glyph too;
++                // otherwise reusing the scratch surface leaves old strokes.
++                int offset = sy * hs.widthByte + sx * hs.pixelSizeByte;
++                hs.buffer[offset] = alpha;
+             }
+         }
+ 
+--- a/libs/font/cellFont.h
++++ b/libs/font/cellFont.h
+@@ -37,7 +37,7 @@
+  * Constants
+  * -----------------------------------------------------------------------*/
+ 
+-#define CELL_FONT_MAX_OPENED        8
++#define CELL_FONT_MAX_OPENED        64
+ #define CELL_FONT_MAX_RENDERERS     4
+ 
+ /* Font type constants */
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -504,6 +504,7 @@
+ 
+ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+ {
++    { static unsigned n; if ((++n % 120)==1) fprintf(stderr,"[pad-debug] data n=%u port=%u init=%d max=%u\n",n,port_no,s_pad_initialized,s_max_connect); }
+     { static int _once = 0;
+       if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
+     if (!s_pad_initialized)
+@@ -847,6 +848,7 @@
+  * run off into the weeds before ever reaching gcm init. */
+ s32 cellPadGetInfo(CellPadInfo2* info)
+ {
++    { static unsigned n; if ((++n % 120)==1) fprintf(stderr,"[pad-debug] info n=%u init=%d\n",n,s_pad_initialized); }
+     uint32_t gaddr = (uint32_t)(uintptr_t)info;
+     if (!s_pad_initialized)
+         return CELL_PAD_ERROR_NOT_OPENED;
+@@ -1047,8 +1049,12 @@
+     if (port_no >= CELL_PAD_MAX_PORT_NUM || !info)
+         return CELL_PAD_ERROR_INVALID_PARAMETER;
+ 
++    /* 32 words (CellPadCapabilityInfo), not CELL_PAD_MAX_CODES: zeroing 64
++     * wrote 128 bytes past the title's buffer. Imabikisou keeps its input
++     * manager right after it (0x1A3F3C04 + 0x8C), so the pad device pointer
++     * was wiped on the first poll and the game never read the pad again. */
+     u32 info_ea = (u32)(uintptr_t)info;
+-    for (u32 i = 0; i < CELL_PAD_MAX_CODES; i++)
++    for (u32 i = 0; i < CELL_PAD_MAX_CAPABILITY_INFO; i++)
+         vm_write32(info_ea + i * 4, 0);
+ 
+     /* Report standard DualShock 3 capabilities */
+--- a/libs/input/cellPad.h
++++ b/libs/input/cellPad.h
+@@ -21,6 +21,7 @@
+ 
+ #define CELL_PAD_MAX_PORT_NUM       7
+ #define CELL_PAD_MAX_CODES          64
++#define CELL_PAD_MAX_CAPABILITY_INFO 32   /* CellPadCapabilityInfo words: 128 bytes */
+ #define CELL_MAX_PADS               CELL_PAD_MAX_PORT_NUM
+ 
+ /* Button bitmask constants (digital buttons, in button[2] low word) */
+@@ -156,9 +157,11 @@
+ /* Peripheral class types (SDK pad_codes.h) */
+ #define CELL_PAD_PCLASS_TYPE_STANDARD   0
+ 
+-/* Capability info for a specific port */
++/* Capability info for a specific port. 32 words, not CELL_PAD_MAX_CODES (64):
++ * a title sizes its buffer by the SDK struct, and the extra 128 bytes land on
++ * whatever follows it. */
+ typedef struct CellPadCapabilityInfo {
+-    u32 info[CELL_PAD_MAX_CODES];
++    u32 info[CELL_PAD_MAX_CAPABILITY_INFO];
+ } CellPadCapabilityInfo;
+ 
+ /* Actuator (vibration) parameter */
+--- a/libs/sync/cellSync.c
++++ b/libs/sync/cellSync.c
+@@ -173,78 +173,89 @@
+  * Barrier
+  * =====================================================================*/
+ 
++/* The barrier is the SDK's 4-byte word (see cellSync.h), not a host struct:
++ * the SPU side of a barrier updates it with GETLLAR/PUTLLC, so the PPU side
++ * has to read and write the same big-endian layout under the lock-line lock.
++ * The old 12-byte host-endian struct also overwrote the 8 bytes after the
++ * barrier at initialize. Imabikisou's Sofdec decoder SPUs notify a barrier
++ * the PPU polls with TryWait, and the boot waited on it forever.
++ *
++ * Arrivals count `value` up and the last one sets bit 15; waiters then count
++ * it back down and the last one clears it (RPCS3 cellSync try_notify and
++ * try_wait). One step of either, or 0 if it cannot proceed yet. */
++static int barrier_step(CellSyncBarrier* b, uint32_t ea, int wait)
++{
++    for (;;) {
++        uint32_t raw = atomic_load(&b->ctrl);
++        uint32_t g   = sync_bswap32(raw);
++        int16_t  value = (int16_t)(g >> 16);
++        uint16_t count = (uint16_t)g;
++        if (!wait) {
++            if (value & 0x8000) return 0;          /* previous round draining */
++            value = (int16_t)(value + 1);
++            if ((uint16_t)value == count) value = (int16_t)(value | 0x8000);
++        } else {
++            if (!(value & 0x8000)) return 0;       /* not everyone arrived */
++            value = (int16_t)(value - 1);
++            if (value == -0x8000) value = 0;
++        }
++        uint32_t ng = ((uint32_t)(uint16_t)value << 16) | count;
++        if (sync_cas((CellSyncMutex*)b, ea, &raw, sync_bswap32(ng)))
++            return 1;
++    }
++}
++
++#define BARRIER_ARG(barrier, ea)                                          \
++    unsigned int ea = (unsigned int)(uintptr_t)(barrier);                 \
++    barrier = GUEST_PTR(barrier, CellSyncBarrier*);                       \
++    if (!barrier) return CELL_SYNC_ERROR_NULL_POINTER;                    \
++    if (ea & 3) return CELL_SYNC_ERROR_ALIGN
++
+ s32 cellSyncBarrierInitialize(CellSyncBarrier* barrier, u16 totalCount)
+ {
+-    barrier = GUEST_PTR(barrier, CellSyncBarrier*);
+-    if (!barrier)
+-        return CELL_SYNC_ERROR_NULL_POINTER;
+-
+-    if (totalCount == 0)
++    BARRIER_ARG(barrier, _ea);
++    if (totalCount == 0 || totalCount > 0x7FFF)
+         return CELL_SYNC_ERROR_INVAL;
+ 
+-    atomic_store(&barrier->arrived, 0);
+-    barrier->total = totalCount;
+-    atomic_store(&barrier->phase, 0);
+-
++    spu_lockline_lock();
++    atomic_store(&barrier->ctrl, sync_bswap32((uint32_t)totalCount));   /* value 0 */
++    if (spu_coh_is_reserved(_ea)) spu_coh_notify_write(_ea);
++    spu_lockline_unlock();
+     return CELL_OK;
+ }
+ 
+ s32 cellSyncBarrierNotify(CellSyncBarrier* barrier)
+ {
+-    barrier = GUEST_PTR(barrier, CellSyncBarrier*);
+-    if (!barrier)
+-        return CELL_SYNC_ERROR_NULL_POINTER;
+-
+-    unsigned int old_arrived = atomic_fetch_add(&barrier->arrived, 1);
+-
+-    /* If we're the last to arrive, advance the phase and reset */
+-    if (old_arrived + 1 >= barrier->total) {
+-        atomic_store(&barrier->arrived, 0);
+-        atomic_fetch_add(&barrier->phase, 1);
+-    }
+-
++    BARRIER_ARG(barrier, _ea);
++    while (!barrier_step(barrier, _ea, 0))
++        SYNC_YIELD();
+     return CELL_OK;
+ }
+ 
+ s32 cellSyncBarrierTryNotify(CellSyncBarrier* barrier)
+ {
+-    /* Same as notify for this implementation. Forward the GUEST pointer as it
+-     * arrived -- cellSyncBarrierNotify translates it, and translating here too
+-     * added vm_base twice. */
+-    return cellSyncBarrierNotify(barrier);
++    BARRIER_ARG(barrier, _ea);
++    return barrier_step(barrier, _ea, 0) ? CELL_OK : CELL_SYNC_ERROR_BUSY;
+ }
+ 
+ s32 cellSyncBarrierWait(CellSyncBarrier* barrier)
+ {
+-    barrier = GUEST_PTR(barrier, CellSyncBarrier*);
+-    if (!barrier)
+-        return CELL_SYNC_ERROR_NULL_POINTER;
+-
+-    unsigned int phase = atomic_load(&barrier->phase);
+-    int spins = 0;
+-
+-    /* Wait until the phase changes (all have arrived) */
+-    while (atomic_load(&barrier->phase) == phase) {
+-        if (++spins > 1000) {
+-            SYNC_YIELD();
+-            spins = 0;
+-        }
+-    }
+-
++    BARRIER_ARG(barrier, _ea);
++    while (!barrier_step(barrier, _ea, 1))
++        SYNC_YIELD();
+     return CELL_OK;
+ }
+ 
+ s32 cellSyncBarrierTryWait(CellSyncBarrier* barrier)
+ {
+-    barrier = GUEST_PTR(barrier, CellSyncBarrier*);
+-    if (!barrier)
+-        return CELL_SYNC_ERROR_NULL_POINTER;
+-
+-    /* Check if all have arrived (count == 0 means reset happened) */
+-    if (atomic_load(&barrier->arrived) != 0)
+-        return CELL_SYNC_ERROR_BUSY;
+-
+-    return CELL_OK;
++    BARRIER_ARG(barrier, _ea);
++    if (sync_trace()) {
++        uint32_t g = sync_bswap32(atomic_load(&barrier->ctrl));
++        static int n = 0;
++        if (n++ < 20) fprintf(stderr, "[SYNC] BARRIER TRYWAIT ea=0x%08X value=0x%04X count=%u\n",
++                              _ea, g >> 16, g & 0xFFFFu);
++    }
++    return barrier_step(barrier, _ea, 1) ? CELL_OK : CELL_SYNC_ERROR_BUSY;
+ }
+ 
+ /* =========================================================================
+--- a/libs/sync/cellSync.h
++++ b/libs/sync/cellSync.h
+@@ -48,11 +48,14 @@
+ 
+ /* ---------------------------------------------------------------------------
+  * CellSyncBarrier -- counter-based barrier
++ *
++ * One 4-byte, 4-aligned big-endian word in guest memory, shared with SPU code
++ * that updates it with GETLLAR/PUTLLC:
++ *     s16 value;   // high half: arrivals; bit 15 set once all have arrived
++ *     u16 count;   // low half:  participants
+  * -----------------------------------------------------------------------*/
+ typedef struct CellSyncBarrier {
+-    atomic_uint arrived;
+-    u32         total;
+-    atomic_uint phase;
++    atomic_uint ctrl;
+ } CellSyncBarrier;
+ 
+ s32 cellSyncBarrierInitialize(CellSyncBarrier* barrier, u16 totalCount);
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -251,6 +251,7 @@
+     memcpy(out->secureFileId, vm_base + set_ea + 12, 16);
+     u32 name = vm_read32(set_ea + 28), buffer = vm_read32(set_ea + 44);
+     out->fileName = name ? (char*)vm_base + name : NULL;
++    { static int n = 0; if (n++ < 6) fprintf(stderr, "[cellSaveData] fileSet name EA=0x%08X\n", name); }
+     out->fileOffset = vm_read32(set_ea + 32);
+     out->fileSize = vm_read32(set_ea + 36);
+     out->fileBufSize = vm_read32(set_ea + 40);
+--- a/libs/system/cellSysutil.c
++++ b/libs/system/cellSysutil.c
+@@ -267,9 +267,15 @@
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_LANG:
+         v = CELL_SYSUTIL_LANG_ENGLISH_US;
+         break;
+-    case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN:
+-        v = CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS;
+-        break;
++    case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN: {
++        /* PS3_ENTER_BUTTON=circle: the Japanese console setting. Titles read
++         * this to choose their confirm button (Imabikisou draws "x 決定" with
++         * the default and "o 決定" with circle). */
++        const char* e = getenv("PS3_ENTER_BUTTON");
++        v = (e && (e[0] == 'c' || e[0] == 'C') && (e[1] == 'i' || e[1] == 'I'))
++            ? CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CIRCLE
++            : CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS;
++        break; }
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT:    v = 0; break; /* YYYYMMDD */
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT:    v = 0; break; /* 24-hour */
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_TIMEZONE:       v = 0; break; /* UTC */
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -231,6 +231,8 @@
+ static CellGcmSecondVHandler s_second_v_handler = NULL;
+ 
+ /* Flip timing */
++/* Last flip uses the same microsecond epoch as sys_time_get_system_time. */
++extern u64 ps3_system_time_us(void);
+ static u64 s_last_flip_time = 0;
+ 
+ /* VBlank counter (incremented on each flip as approximation) */
+@@ -446,7 +448,7 @@
+     s_vblank_handler = NULL;
+     s_user_handler = NULL;
+     s_second_v_handler = NULL;
+-    s_last_flip_time = get_timestamp_ns();
++    s_last_flip_time = ps3_system_time_us();
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+     s_flip_mode = CELL_GCM_DISPLAY_VSYNC;
+     s_debug_level = CELL_GCM_DEBUG_LEVEL0;
+@@ -1031,22 +1033,52 @@
+              : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
+     u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
+     if (bpp == 4) nv3089_engine_read(in_pitch, out_w, out_h);
++    /* Copy guest bytes directly. Source and destination are both big-endian
++     * guest memory, so a pixel is moved as raw bytes; going through
++     * vm_read32/vm_write32 per pixel ran every one through the hot-read map,
++     * the store watch and an SPU-reservation lookup -- a 1280x720 movie frame
++     * was ~1M of those per blit and the whole drain thread lived in here
++     * (Imabikisou's Sofdec frames: the game paced at ~17 fps waiting on it).
++     * An unscaled row is one memcpy. SPU reservations are honoured once per
++     * written 128-byte line afterwards instead of once per pixel. */
++    extern uint8_t* vm_base;
++    extern int  spu_coh_is_reserved(uint32_t ea);
++    extern void spu_coh_notify_write(uint32_t ea);
++    const int unscaled_x = (s_nv3089.ds_dx == (1u << 20)) && ((u0 & 0xF) == 0);
+     for (u32 y = 0; y < out_h; y++) {
+         u32 dy = out_y + y;
+         if (dy < cy0 || dy >= cy1) continue;
+         u64 sv = ((u64)v0 << 8) + (u64)y * s_nv3089.dt_dy;         /* 20.12 */
+         u32 sy = (u32)(sv >> 20);
+-        for (u32 x = 0; x < out_w; x++) {
+-            u32 dx = out_x + x;
+-            if (dx < cx0 || dx >= cx1) continue;
+-            u64 su = ((u64)u0 << 8) + (u64)x * s_nv3089.ds_dx;
+-            u32 sx = (u32)(su >> 20);
+-            u32 s = src + sy * in_pitch + sx * bpp;
+-            u32 d = dst + dy * dst_pitch + dx * bpp;
+-            if (bpp == 4)      vm_write32(d, vm_read32(s));
+-            else if (bpp == 2) vm_write16(d, vm_read16(s));
+-            else               vm_write8(d, vm_read8(s));
++        u32 xa = (out_x < cx0) ? cx0 - out_x : 0;                   /* clipped x span */
++        u32 xb = out_w;
++        if (out_x + xb > cx1) xb = (cx1 > out_x) ? cx1 - out_x : 0;
++        if (xa >= xb) continue;
++        u32 drow = dst + dy * dst_pitch;
++        if (unscaled_x) {
++            u32 sx0 = (u32)(((u64)u0 << 8) >> 20) + xa;
++            memmove(vm_base + drow + (out_x + xa) * bpp,
++                    vm_base + src + sy * in_pitch + sx0 * bpp, (size_t)(xb - xa) * bpp);
++        } else {
++            const uint8_t* srow = vm_base + src + sy * in_pitch;
++            uint8_t* dp = vm_base + drow + (out_x + xa) * bpp;
++            u64 su = ((u64)u0 << 8) + (u64)xa * s_nv3089.ds_dx;
++            const u64 step = s_nv3089.ds_dx;
++            if (bpp == 4) {
++                for (u32 x = xa; x < xb; x++, dp += 4, su += step) {
++                    uint32_t px; memcpy(&px, srow + (u32)(su >> 20) * 4, 4); memcpy(dp, &px, 4);
++                }
++            } else if (bpp == 2) {
++                for (u32 x = xa; x < xb; x++, dp += 2, su += step) {
++                    uint16_t px; memcpy(&px, srow + (u32)(su >> 20) * 2, 2); memcpy(dp, &px, 2);
++                }
++            } else {
++                for (u32 x = xa; x < xb; x++, dp++, su += step) *dp = srow[(u32)(su >> 20)];
++            }
+         }
++        for (u32 line = (drow + (out_x + xa) * bpp) & ~127u;
++             line < drow + (out_x + xb) * bpp; line += 128)
++            if (spu_coh_is_reserved(line)) spu_coh_notify_write(line);
+     }
+     if (bpp == 4) {
+         const u32 x0 = out_x > cx0 ? out_x : cx0, y0 = out_y > cy0 ? out_y : cy0;
+@@ -1054,6 +1086,27 @@
+         const u32 y1 = (out_y + out_h < cy1) ? out_y + out_h : cy1;
+         nv3089_engine_wrote(dst_pitch, x0, y0, x1, y1);
+     }
++    /* MOVIE_RATE=1: large blits per second and how many carried a NEW source
++     * image (hash of a sparse sample), plus the longest gap between new
++     * images -- the movie's real frame cadence, which the present rate hides. */
++    { static int on = -1; if (on < 0) on = getenv("MOVIE_RATE") ? 1 : 0;
++      if (on && out_w >= 320 && out_h >= 180) {
++          extern uint64_t ps3_system_time_us(void);
++          static uint64_t t0, last_new, max_gap; static unsigned n, nnew; static uint64_t last_h;
++          uint64_t now = ps3_system_time_us(); if (!t0) { t0 = now; last_new = now; }
++          uint64_t h = 1469598103934665603ull;
++          const u32 in_w = (u32)(((u64)out_w * s_nv3089.ds_dx) >> 20);
++          const u32 in_h = (u32)(((u64)out_h * s_nv3089.dt_dy) >> 20);
++          for (u32 k = 0; k < 64; k++) {
++              u32 sy = (in_h ? (k * 37u) % in_h : 0), sx = (in_w ? (k * 101u) % in_w : 0);
++              h = (h ^ *(const uint32_t*)(vm_base + src + sy * in_pitch + sx * bpp)) * 1099511628211ull;
++          }
++          n++;
++          if (h != last_h) { nnew++; if (now - last_new > max_gap) max_gap = now - last_new; last_new = now; last_h = h; }
++          if (now - t0 >= 2000000ull) {
++              fprintf(stderr, "[movie] %.1f blits/s, %.1f new images/s, longest gap %.1f ms (%ux%u)\n",
++                      n * 1e6 / (double)(now - t0), nnew * 1e6 / (double)(now - t0), max_gap / 1000.0, out_w, out_h);
++              n = nnew = 0; max_gap = 0; t0 = now; } } }
+     { static int _n = 0; static int cap = -1;
+       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
+       if (cap && _n < cap) { _n++;
+@@ -2315,7 +2368,7 @@
+     /* Flip requested but not yet shown: a subsequent cellGcmSetWaitFlip blocks
+      * until the present thread's cellGcmTickFlip marks it done (vsync). */
+     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
+-    s_last_flip_time = get_timestamp_ns();
++    s_last_flip_time = ps3_system_time_us();
+ 
+     /* Invoke via OPD resolution, not a raw call into guest code.
+      *
+@@ -2408,7 +2461,7 @@
+     gcm_set_current_display_buffer(bufferId);
+     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+     s_flip_request_count++;
+-    s_last_flip_time = get_timestamp_ns();
++    s_last_flip_time = ps3_system_time_us();
+ 
+     /* Invoke the guest flip handler via OPD resolution -- s_flip_handler holds
+      * the raw guest OPD (e.g. 0x530D70); calling it as a host function pointer
+--- a/libs/video/cellResc.c
++++ b/libs/video/cellResc.c
+@@ -1,4 +1,4 @@
+-/*
++﻿/*
+  * ps3recomp - cellResc HLE implementation
+  *
+  * Resolution scaling stub. Since the recompiled game renders through
+@@ -28,6 +28,7 @@
+ static u32 s_flip_handler_opd = 0;
+ static u32 s_vblank_handler_opd = 0;
+ static u32 s_flip_target = 0;   /* display buffer the next convert-and-flip presents */
++static int s_src_is_scanout = 0; /* sources registered as the display buffers (SetSrc) */
+ static s32 s_flip_status = 0;
+ static u64 s_last_flip_time = 0;
+ static float s_aspect_h = 1.0f;
+@@ -54,6 +55,7 @@
+     s_flip_handler_opd = 0;
+     s_vblank_handler_opd = 0;
+     s_flip_target = 0;
++    s_src_is_scanout = 0;
+     s_flip_status = 0;
+     s_last_flip_time = 0;
+     s_aspect_h = 1.0f;
+@@ -151,6 +153,21 @@
+     printf("[cellResc] SetSrc(%d): offset=0x%X pitch=%u %ux%u fmt=%u\n", index,
+            s_src[index].offset, s_src[index].pitch, s_src[index].width,
+            s_src[index].height, s_src[index].format);
++
++    /* A title that presents through RESC never calls cellGcmSetDisplayBuffer:
++     * libresc registers its own output buffers and scales each source into one
++     * at SetConvertAndFlip. The convert is not emitted here (see below), so the
++     * source itself is the scanout: register it as display buffer `index`, and
++     * the flip shows the surface the title rendered. Imabikisou presents its
++     * 1280x720 frame this way and otherwise flipped nothing ("0 display
++     * buffer(s)"). A title that does register display buffers keeps them. */
++    { extern s32 cellGcmSetDisplayBuffer(u32, u32, u32, u32, u32);
++      extern u32 cellGcm_display_buffer_count(void);
++      if (s_src_is_scanout || !cellGcm_display_buffer_count()) {
++          s_src_is_scanout = 1;
++          cellGcmSetDisplayBuffer((u32)index, s_src[index].offset, s_src[index].pitch,
++                                  s_src[index].width, s_src[index].height);
++      } }
+     return CELL_OK;
+ }
+ 
+@@ -174,8 +191,9 @@
+     return CELL_OK;
+ }
+ 
+-s32 cellRescSetConvertAndFlip(s32 index)
+-{
++s32 cellRescSetConvertAndFlip(u32 con, s32 index)
++{
++    (void)con;   /* the convert draw is not emitted, so nothing goes into it */
+     if (!s_initialized)
+         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;
+ 
+@@ -195,7 +213,9 @@
+     extern s32 cellGcmSetFlipCommand(u32 bufferId);
+     extern u32 cellGcm_display_buffer_count(void);
+     u32 nbuf = cellGcm_display_buffer_count();
+-    if (nbuf) {
++    if (s_src_is_scanout && index >= 0 && index < 8) {
++        cellGcmSetFlipCommand((u32)index);      /* the source IS the display buffer */
++    } else if (nbuf) {
+         cellGcmSetFlipCommand(s_flip_target % nbuf);
+         s_flip_target = (u32)((s_flip_target + 1) % nbuf);
+     }
+@@ -212,6 +232,18 @@
+         ps3_invoke_guest(s_flip_handler_opd, 1, 0, 0, 0, 0, 0, 0, 0);
+ 
+     return CELL_OK;
++}
++
++/* void cellRescSetWaitFlip(CellGcmContextData* con): libresc queues a "wait
++ * until the flip is shown" into the command buffer. The FIFO here does not
++ * model that wait, so wait on the CPU the way cellGcmSetWaitFlip does: until the
++ * frame clock's ~60 Hz tick completes the pending flip. Unregistered, it
++ * returned at once and Imabikisou ran its frame loop at 100-250 fps. */
++void cellRescSetWaitFlip(u32 con)
++{
++    (void)con;
++    extern void cellGcmSetWaitFlip(void);
++    cellGcmSetWaitFlip();
+ }
+ 
+ s32 cellRescSetFlipHandler(void (*handler)(u32))
+--- a/libs/video/cellResc.h
++++ b/libs/video/cellResc.h
+@@ -99,7 +99,8 @@
+ 
+ s32 cellRescSetSrc(s32 index, const CellRescSrc* src);
+ s32 cellRescSetDsts(u32 displayMode, const CellRescDsts* dsts);
+-s32 cellRescSetConvertAndFlip(s32 index);
++s32 cellRescSetConvertAndFlip(u32 con, s32 index);   /* con: CellGcmContextData* (guest) */
++void cellRescSetWaitFlip(u32 con);                      /* con: CellGcmContextData* (guest) */
+ 
+ s32 cellRescSetFlipHandler(void (*handler)(u32));
+ s32 cellRescSetVBlankHandler(void (*handler)(u32));
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -1233,6 +1233,18 @@
+ /* ---------------------------------------------------------------------------
+  * enable gate
+  * -----------------------------------------------------------------------*/
++// The guest vblank clock already paces the port. Allow a port to avoid
++// blocking its window/FIFO thread a second time on the host vblank.
++static unsigned ld_present_interval(void)
++{
++    static int interval = -1;
++    if (interval < 0) {
++        const char* value = getenv("RSX_VSYNC");
++        interval = value && value[0] == '0' ? 0 : 1;
++    }
++    return (unsigned)interval;
++}
++
+ int rsx_live_draw_enabled(void)
+ {
+     static int cached = -1;
+@@ -8322,7 +8334,7 @@
+ 
+     ld_flush(LD_FLUSH_MOVIE_PRESENT);
+     {
+-        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, 1, 0);
++        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, ld_present_interval(), 0);
+         if (SUCCEEDED(present_hr))
+             ld_present_measure_record(g_ld_frames);
+         else {
+@@ -8866,7 +8878,7 @@
+ 
+     ld_flush(LD_FLUSH_PRESENT);
+     {
+-        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, 1, 0);
++        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, ld_present_interval(), 0);
+         if (SUCCEEDED(present_hr))
+             ld_present_measure_record(g_ld_frames + 1u);
+         else {
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -658,8 +658,15 @@
+                 fprintf(stderr, "[TUNERFIX] sysPrxForUser 0xE0998DBF -> 0x8001112E (profiler not loaded)\n");
+             return;
+         }
+-        static int logged = 0;
+-        if (logged < 40) { fprintf(stderr, "[hle] unresolved NID 0x%08X\n", nid); logged++; }
++        static uint32_t logged_nids[128];
++        static unsigned logged_count = 0;
++        bool already_logged = false;
++        for (unsigned i = 0; i < logged_count; ++i)
++            if (logged_nids[i] == nid) { already_logged = true; break; }
++        if (!already_logged && logged_count < 128) {
++            logged_nids[logged_count++] = nid;
++            fprintf(stderr, "[hle] unresolved NID 0x%08X\n", nid);
++        }
+         /* cellSaveData call-shape capture: dump r3-r10 + resolve r7/r8 as OPD
+          * callbacks (statCallback/fileCallback) to learn the cellSaveDataAutoLoad2
+          * protocol so it can be implemented. */
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3517,17 +3517,56 @@
+  * ponytail: bump allocator, never freed. A thread's block is dead once it
+  * exits, but the window holds dozens and titles create their threads at boot
+  * and keep them. Reuse a free list if a title ever churns threads. */
++/* Per-thread TLS blocks live in their own window, below the 0x10000000 data
++ * segment, and are recycled when a thread finishes. They used to be bumped up
++ * from PPU_TLS_IMG (0x10F00000) and never freed: a title whose data segment
++ * covers that address (Imabikisou's .bss runs 0x100A0000..0x1A5BFF98) had every
++ * thread's TLS overlap its globals, and one that churns threads (a save thread
++ * per autosave) walked further into them each time. Its locale state in TLS
++ * was overwritten, sprintf stopped recognising '%', the save file name came out
++ * as "SHIORI%02d.DAT", every save failed and the game retried forever on a
++ * black screen. The main block from sys_initialize_tls sits at 0x0E000000. */
++/* The main thread's TLS block once sys_initialize_tls has run (ppu_sysprx.cpp).
++ * A new thread's block is seeded from it rather than from the bare template:
++ * the title's libc sets its per-thread locale tables (Imabikisou: the
++ * multibyte state tables at TLS+0xD8) during C runtime start-up, in .tbss, and
++ * the copy made from the template left them zero -- mbtowc then recognised no
++ * character, '%' included, so sprintf on any thread but the first copied its
++ * format verbatim. */
++extern "C" { uint32_t g_ppu_main_tls_block = 0; }
++#define PPU_TLS_THREAD_BASE 0x0E100000u
++#define PPU_TLS_THREAD_LIM  0x0FE00000u
++static volatile long s_tls_lock = 0;
++static uint32_t s_tls_free[1024];
++static int      s_tls_nfree = 0;
++
++extern "C" void ppu_tls_free_block(uint32_t tp)
++{
++    if (tp < PPU_TLS_THREAD_BASE + 0x7000u || tp >= PPU_TLS_THREAD_LIM) return;   /* not ours */
++    while (__atomic_exchange_n(&s_tls_lock, 1, __ATOMIC_ACQUIRE)) {}
++    if (s_tls_nfree < 1024) s_tls_free[s_tls_nfree++] = tp - 0x7000u;
++    __atomic_store_n(&s_tls_lock, 0, __ATOMIC_RELEASE);
++}
++
+ static uint32_t ppu_tls_new_block(void)
+ {
+     if (!g_tls_memsz) return 0;                 /* no PT_TLS: nothing to copy */
+     uint32_t total = (g_tls_memsz + 0x7000u + 0xFFFu) & ~0xFFFu;
+-    uint32_t lim   = 0x11000000u;               /* same bound the main block uses */
+-    if (ppu_vm_size && ppu_vm_size < lim) lim = ppu_vm_size;
+-    /* Threads are created concurrently, so hand out offsets atomically. */
+-    static uint32_t s_bump = 0;
+-    uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
+-    uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
+-    if (base + total > lim) return 0;           /* out of room: share, as before */
++    uint32_t base = 0;
++    while (__atomic_exchange_n(&s_tls_lock, 1, __ATOMIC_ACQUIRE)) {}
++    if (s_tls_nfree > 0) base = s_tls_free[--s_tls_nfree];
++    __atomic_store_n(&s_tls_lock, 0, __ATOMIC_RELEASE);
++    if (!base) {
++        /* Threads are created concurrently, so hand out offsets atomically. */
++        static uint32_t s_bump = 0;
++        uint32_t off = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
++        base = PPU_TLS_THREAD_BASE + off;
++        if (base + total > PPU_TLS_THREAD_LIM) return 0;   /* out of room: share, as before */
++    }
++    if (g_ppu_main_tls_block && !getenv("PPU_TLS_FROM_TEMPLATE")) {
++        memcpy(vm_base + base, vm_base + g_ppu_main_tls_block, g_tls_memsz);
++        return base + 0x7000u;
++    }
+     if (g_tls_filesz) memcpy(vm_base + base, vm_base + g_tls_vaddr, g_tls_filesz);
+     if (g_tls_memsz > g_tls_filesz)
+         memset(vm_base + base + g_tls_filesz, 0, g_tls_memsz - g_tls_filesz);
+@@ -3540,7 +3579,10 @@
+     ppu_opd_resolve((uint32_t)ctx->cia, &code, &toc);
+     if (toc) ctx->gpr[2] = toc;
+     if (!ctx->gpr[13]) { uint32_t tp = ppu_tls_new_block();
+-                         ctx->gpr[13] = tp ? tp : PPU_TLS_TP; }
++                         ctx->gpr[13] = tp ? tp : PPU_TLS_TP;
++                         fprintf(stderr, "[tls] thread %u r13=0x%08X%s\n", (unsigned)ctx->thread_id,
++                                 (uint32_t)ctx->gpr[13], tp ? "" : " (SHARED fallback)"); }
++    else fprintf(stderr, "[tls] thread %u r13=0x%08X (preset)\n", (unsigned)ctx->thread_id, (uint32_t)ctx->gpr[13]);
+     ppu_fn fn = ppu_lookup(code);
+     if (!fn) {
+         fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",
+@@ -3587,6 +3629,18 @@
+         s_opd_fixups[s_opd_fixup_n].code = code; s_opd_fixups[s_opd_fixup_n].toc = toc; s_opd_fixup_n++; }
+ }
+ 
++// A callback executes on its caller's guest thread and must retain that
++// thread's TLS (locale/errno/allocator state). PPU_TLS_TP names only the bare
++// startup template and may overlap a title's BSS after CRT initialization.
++static uint32_t ppu_callback_tls(const ppu_context* caller)
++{
++    if (caller && caller->gpr[13]) return (uint32_t)caller->gpr[13];
++    static PPU_THREAD_LOCAL uint32_t callback_tp = 0;
++    if (!callback_tp) callback_tp = ppu_tls_new_block();
++    if (callback_tp) return callback_tp;
++    return g_ppu_main_tls_block ? g_ppu_main_tls_block + 0x7000u : PPU_TLS_TP;
++}
++
+ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
+                                    uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                    uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+@@ -3622,13 +3676,13 @@
+     ctx.gpr[2]  = toc;
+     ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+     ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
+     ctx.cia     = code;
+     /* Save/restore g_active_ctx: this scratch ctx lives on the stack, so leaving
+      * g_active_ctx pointing at it after we return leaves a DANGLING pointer once the
+      * frame is reused -- corrupting the crash handler / any diagnostic that reads the
+      * current-thread ctx. Restore the caller's. */
+     ppu_context* saved_active = g_active_ctx;
++    ctx.gpr[13] = ppu_callback_tls(saved_active);
+     /* Thread identity: a zeroed scratch ctx used to run callbacks as thread_id 0
+      * -- aliasing the main thread in every owner-tracking primitive. Inherit the
+      * calling guest thread's id; host-only threads (ticker) get a per-host-thread
+@@ -3667,11 +3721,11 @@
+     ctx.gpr[2]  = toc;
+     ctx.gpr[3]  = a0; ctx.gpr[4] = a1; ctx.gpr[5] = a2; ctx.gpr[6] = a3;
+     ctx.gpr[7]  = a4; ctx.gpr[8] = a5; ctx.gpr[9] = a6; ctx.gpr[10] = a7;
+-    ctx.gpr[13] = PPU_TLS_TP;
+     ctx.cia     = code;
+     /* Save/restore g_active_ctx (see ppu_guest_call): the scratch ctx is stack-local,
+      * so a dangling g_active_ctx after return corrupts the crash handler / diagnostics. */
+     ppu_context* saved_active = g_active_ctx;
++    ctx.gpr[13] = ppu_callback_tls(saved_active);
+     /* Inherit the caller's thread identity (see ppu_guest_call above). */
+ #ifdef _WIN32
+     ctx.thread_id = saved_active ? saved_active->thread_id
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -22,6 +22,7 @@
+ #include "../memory/vm.h"   /* VM_HLE_INJECT_BASE -- not platform-specific */
+ 
+ extern "C" uint8_t* vm_base;
++extern "C" uint32_t g_ppu_main_tls_block;
+ extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
+ extern "C" uint32_t vm_read32(uint64_t a);
+ extern "C" uint64_t vm_read64(uint64_t a);
+@@ -50,6 +51,7 @@
+ 
+     ctx->gpr[13] = block + 0x7000u;   /* thread pointer; TLS data at r13-0x7000 */
+     ctx->gpr[3]  = 0;                  /* CELL_OK */
++    if (!g_ppu_main_tls_block) g_ppu_main_tls_block = block;
+     fprintf(stderr, "[crt] sys_initialize_tls: block 0x%08X, r13=0x%08X (seg 0x%X+%u, mem %u)\n",
+             block, (uint32_t)ctx->gpr[13], seg_addr, seg_size, mem_size);
+ }
+@@ -61,17 +63,25 @@
+  * lands here) paced the intro at ~1/10th speed: video decoded at <1 fps,
+  * the audio preload threshold took forever to fill (movie stayed silent),
+  * and every frontend animation timed off it crawled. */
+-static void sys_time_get_system_time(ppu_context* ctx)
++/* The guest's system clock, for every HLE that hands the title a time it will
++ * compare against sys_time_get_system_time (cellAudioGetPortTimestamp does).
++ * Two clocks with different origins look like a block scheduled hours away. */
++extern "C" uint64_t ps3_system_time_us(void)
+ {
+ #ifdef _WIN32
+     static LARGE_INTEGER s_freq, s_base;
+     if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); QueryPerformanceCounter(&s_base); }
+     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+-    ctx->gpr[3] = (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
++    return (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
+ #else
+     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+-    ctx->gpr[3] = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
++    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+ #endif
++}
++
++static void sys_time_get_system_time(ppu_context* ctx)
++{
++    ctx->gpr[3] = ps3_system_time_us();
+ }
+ 
+ /* sys_process_is_stack(u32 addr) -> 1 if addr is in the stack region. We model
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -173,6 +173,10 @@
+     fflush(stderr);
+ }
+ 
++/* lv2 stop service (lv2_register.c): returns 1 when it handled the stop and
++ * resumed the SPU. */
++int (*g_spu_stop_hook)(spu_context* ctx) = NULL;
++
+ /* SPU `stop` / stop-and-signal. A real SPU stop HALTS the core; the previous
+  * lifted emission only did `status=...; return;`, which unwound ONE frame and
+  * let the caller's service loop keep running -- so a SPURS policy doing
+@@ -193,6 +197,9 @@
+     static int s_halt = -1;
+     if (s_halt < 0) s_halt = getenv("YDKJ_STOP_HALT") ? 1 : 0;
+     ctx->status = SPU_STATUS_STOPPED_BY_STOP;
++    /* lv2 services some stops and resumes the SPU past them
++     * (sys_spu_thread_receive_event); the hook sets status back to RUNNING. */
++    if (g_spu_stop_hook && g_spu_stop_hook(ctx)) return;
+     if (s_halt) spu_halt(ctx);
+ }
+ 
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -33,22 +33,14 @@
+ #if defined(_MSC_VER)
+ #include <intrin.h>
+ #include <windows.h>   /* SwitchToThread */
+-static volatile long g_lockline = 0;
+-/* Test-and-test-and-set: spin on a plain read (no cache-line ping-pong) with a
+- * pause, and yield after a long wait. The bare exchange loop let GH3's four
+- * idle job-policy pollers saturate the line and delay every other SPU atomic
+- * -- FMOD's mixer task among them, 25-40 ms at a time. */
+-void spu_lockline_lock(void)
+-{
+-    unsigned spins = 0;
+-    while (_InterlockedExchange(&g_lockline, 1)) {
+-        do {
+-            _mm_pause();
+-            if (++spins >= 4096) { spins = 0; SwitchToThread(); }
+-        } while (g_lockline);
+-    }
+-}
+-void spu_lockline_unlock(void) { _InterlockedExchange(&g_lockline, 0); }
++/* One shared exclusive lock still serializes every reservation transaction.
++ * A contended spinlock let idle video workers burn whole host cores and
++ * compete with the audio producer. SRWLOCK blocks a waiter after its bounded
++ * native spin, and supplies the same acquire/release memory ordering. */
++static SRWLOCK g_lockline = SRWLOCK_INIT;
++void spu_lockline_lock(void) { AcquireSRWLockExclusive(&g_lockline); }
++void spu_lockline_unlock(void) { ReleaseSRWLockExclusive(&g_lockline); }
++
+ #else
+ #include <stdatomic.h>
+ static atomic_flag g_lockline = ATOMIC_FLAG_INIT;
+--- a/runtime/spu/spu_lifted_thread.c
++++ b/runtime/spu/spu_lifted_thread.c
+@@ -2,6 +2,7 @@
+ 
+ #include "spu_lifted_thread.h"
+ #include "spu_context.h"
++#include "spu_workload.h"
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -64,6 +65,50 @@
+     }
+ }
+ 
++/* Same layout rules as spu_deploy_image, from a captured segment table. */
++static void spu_deploy_segments(spu_context* ctx, const spu_lifted_image* img)
++{
++    for (uint32_t i = 0; i < img->nsegs; i++) {
++        uint32_t ls = img->segs[i].ls & SPU_LS_MASK, size = img->segs[i].size, src = img->segs[i].src;
++        if (size > SPU_LS_SIZE - ls) size = SPU_LS_SIZE - ls;
++        if (img->segs[i].type == 1) {
++            if (src && vm_base) memcpy(&ctx->ls[ls], vm_base + src, size);
++        } else if (img->segs[i].type == 2) {
++            memset(&ctx->ls[ls], (int)(src & 0xFFu), size);
++        }
++    }
++}
++
++/* SDK-built images commonly all start at LS 0x100 -- Imabikisou ships a CRI
++ * sound renderer, a colour converter and the Sofdec video decoder that do -- so
++ * the entry point does not say which lifted image a thread runs: resolving it by
++ * address picked whichever registered first, and the video decoder's threads ran
++ * the sound renderer. The image's COPY segments are the bytes
++ * build_spu_workloads.py registers as "<image>.text", so a segment whose
++ * fingerprint is registered names the image exactly. */
++void spu_lifted_image_capture(uint32_t img_ea, spu_lifted_image* out)
++{
++    memset(out, 0, sizeof *out);
++    if (!img_ea || !vm_base) return;
++    uint32_t segs_ea = rd_be32(img_ea + 0x08);
++    int32_t  nsegs   = (int32_t)rd_be32(img_ea + 0x0C);
++    for (int32_t i = 0; segs_ea && i < nsegs && out->nsegs < 8; i++) {
++        uint32_t s = segs_ea + (uint32_t)i * 0x18u;
++        uint32_t type = rd_be32(s + 0x00), ls = rd_be32(s + 0x04), size = rd_be32(s + 0x08);
++        uint32_t src  = rd_be32(s + 0x10);
++        if (!src) src = rd_be32(s + 0x14);
++        out->segs[out->nsegs].type = type;
++        out->segs[out->nsegs].ls   = ls;
++        out->segs[out->nsegs].size = size;
++        out->segs[out->nsegs].src  = src;
++        out->nsegs++;
++        int img = 0;
++        if (!out->image_id && type == 1 && src && size && size <= SPU_LS_SIZE &&
++            spu_workload_find_img(spu_workload_fingerprint(vm_base + src, size), &img) && img > 0)
++            out->image_id = img;
++    }
++}
++
+ int spu_lifted_thread_available(uint32_t entry)
+ {
+     return spu_have_function(entry & SPU_LS_MASK);
+@@ -89,7 +134,12 @@
+     { int img = spu_image_of_function(ctx->pc);
+       ctx->image_id = (img >= 0) ? img : 0; }
+ 
+-    if (d->img_ea) spu_deploy_image(ctx, d->img_ea);
++    /* The entry point alone is ambiguous (see spu_lifted_image_capture): the
++     * image identified by content at initialize wins when there is one. */
++    if (d->image && d->image->image_id > 0) ctx->image_id = d->image->image_id;
++
++    if (d->image && d->image->nsegs) spu_deploy_segments(ctx, d->image);
++    else if (d->img_ea) spu_deploy_image(ctx, d->img_ea);
+ 
+     /* sys_spu_thread_argument is four u64s and lv2 puts each in the preferred
+      * doubleword of r3..r6 (RPCS3 sys_spu.cpp: gpr[3+i] = from64(0, arg[i])).
+--- a/runtime/spu/spu_lifted_thread.h
++++ b/runtime/spu/spu_lifted_thread.h
+@@ -27,6 +27,19 @@
+ 
+ struct spu_context;
+ 
++/* A sys_spu_image as it was at sys_spu_thread_initialize. lv2 loads the image
++ * there, and titles build the descriptor on their stack (Imabikisou does), so by
++ * group_start the EA can point at a reused frame. The segment table is copied
++ * and the lifted image identified while the descriptor is still valid. */
++typedef struct spu_lifted_image {
++    int      image_id;   /* registry image id by segment fingerprint, 0 = unknown */
++    uint32_t nsegs;
++    struct { uint32_t type, ls, size, src; } segs[8];
++} spu_lifted_image;
++
++/* Fill `out` from the guest sys_spu_image at `img_ea` (zeroed if img_ea is 0). */
++void spu_lifted_image_capture(uint32_t img_ea, spu_lifted_image* out);
++
+ /* What lv2 knows about an SPU thread by the time its group starts. */
+ typedef struct spu_lifted_thread_desc {
+     uint32_t tid;        /* thread id handed out by sys_spu_thread_initialize */
+@@ -34,6 +47,7 @@
+     uint32_t entry;      /* LS entry point, read from the sys_spu_image       */
+     uint32_t img_ea;     /* guest sys_spu_image; 0 deploys nothing            */
+     uint64_t args[4];    /* sys_spu_thread_argument, as captured at initialize */
++    const spu_lifted_image* image; /* captured at initialize; preferred to img_ea */
+ } spu_lifted_thread_desc;
+ 
+ /* How the thread stopped, in the terms the group state machine needs. */
+--- a/runtime/spu/spu_raw.c
++++ b/runtime/spu/spu_raw.c
+@@ -496,7 +496,16 @@
+                       (unsigned)(s - s_spu), (unsigned)(s->ctx->pc & SPU_LS_MASK),
+                       s->ctx->status, (unsigned long long)s->ctx->steps,
+                       (unsigned)s->ctx->ch_out_mbox.count, (unsigned)s->ctx->ch_in_mbox.count,
+-                      g_active_ctx ? (uint32_t)g_active_ctx->lr : 0); }
++                      g_active_ctx ? (uint32_t)g_active_ctx->lr : 0);
++          if (n % 20000000u == 0 && getenv("IMBK_RAW_STATE")) {
++              spu_context* c = s->ctx;
++              fprintf(stderr, "[raw-state] pc=%X rem10=%08X rem17=%08X rem20=%08X chunk6=%08X size64=%08X size69=%08X mask73=%08X\n",
++                  c->pc, c->gpr[10]._u32[0], c->gpr[17]._u32[0], c->gpr[20]._u32[0],
++                  c->gpr[6]._u32[0], c->gpr[64]._u32[0], c->gpr[69]._u32[0], c->gpr[73]._u32[0]);
++              fprintf(stderr, "[raw-state] ea9=%08X:%08X src11=%08X:%08X low79=%08X mask23=%08X mask21=%08X sub77=%08X:%08X\n",
++                  c->gpr[9]._u32[0], c->gpr[9]._u32[1], c->gpr[11]._u32[0], c->gpr[11]._u32[1],
++                  c->gpr[79]._u32[0],c->gpr[23]._u32[0],c->gpr[21]._u32[0],c->gpr[77]._u32[0],c->gpr[77]._u32[1]);
++          } }
+         *out = MBOX_STATUS(s->ctx->ch_out_mbox.count,
+                            SPU_IN_MBOX_FREE(s->ctx->ch_in_mbox.count),
+                            s->ctx->ch_out_intr_mbox.count);
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -295,6 +295,9 @@
+      * it lazily hands every thread the last thread's values. */
+     uint64_t args[4];
+     uint32_t img_ea;         /* sys_spu_image descriptor EA (for LS segment load) */
++    /* The image as it was at initialize: titles build the descriptor on their
++     * stack, so img_ea may point at a reused frame by group_start. */
++    spu_lifted_image image;
+     /* Real SPU execution: the architectural context a thread running its own
+      * lifted image owns, allocated at group_start and holding that thread's
+      * local store. NULL for fallback and interpreter threads. */
+@@ -336,6 +339,11 @@
+      * waiting on the command queue never woke. */
+     struct { uint32_t spup; uint32_t queue; } evt_bind[8];
+     int                 evt_bind_n;
++    /* sys_spu_thread_bind_queue(id, eq, spuq): the queues this SPU thread
++     * RECEIVES from with sys_spu_thread_receive_event (stop 0x110), by the
++     * spuq number it writes to its outbound mailbox before the stop. */
++    struct { uint32_t spuq; uint32_t queue; } qbind[8];
++    int                 qbind_n;
+ } spu_thread_t;
+ 
+ typedef struct {
+@@ -610,6 +618,7 @@
+      * sys_spu_image layout: type/entry/segs/nsegs — entry at +4. */
+     if (img_ea) t->entry_point = vm_read_be32(img_ea + 4);
+     t->img_ea    = img_ea;
++    spu_lifted_image_capture(img_ea, &t->image);
+     t->args_ea   = args_ea;
+     t->args_size = 0;  /* not known until decoder reads it; sys_spu_thread_args is 32 B */
+     /* lv2 copy semantics: take the four u64s now (see spu_thread_t.args). */
+@@ -710,7 +719,8 @@
+ #endif
+ {
+ #ifdef _WIN32
+-    { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }  /* let SO reach the reporter */
++    { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
++    if (getenv("SPU_HOST_PRIORITY")) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);  /* let SO reach the reporter */
+ #endif
+     spu_thread_t* t = (spu_thread_t*)arg;
+     spu_lifted_thread_result r;
+@@ -749,7 +759,8 @@
+ #endif
+ {
+ #ifdef _WIN32
+-    { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }  /* let SO reach the reporter */
++    { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
++    if (getenv("SPU_HOST_PRIORITY")) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);  /* let SO reach the reporter */
+ #endif
+     spu_thread_t* t = (spu_thread_t*)arg;
+     int32_t rc = 0;
+@@ -1012,6 +1023,7 @@
+                 d.group_id = id;
+                 d.entry    = t->entry_point;
+                 d.img_ea   = t->img_ea;
++                d.image    = &t->image;
+                 for (int a = 0; a < 4; a++) d.args[a] = t->args[a];
+                 spu_lifted_thread_setup(t->sctx, &d);
+                 t->running = 1;
+@@ -1643,6 +1655,16 @@
+             spu_group_t* group = spu_find_group(spu->spu_group_id);
+             if (group) queue = group->user_event_ports[port];
+             ReleaseSRWLockShared(&s_spu_port_lock);
++            /* sys_spu_thread_connect_event(thread, queue, SYS_SPU_THREAD_EVENT_USER,
++             * spup) binds the port on the THREAD rather than the group (RPCS3:
++             * spu_thread::spup). Imabikisou's CRI sound renderer sends on such a
++             * port and then waits for the status; without this lookup the event
++             * was dropped and the SPU and the PPU waited on each other forever. */
++            if (!queue) {
++                spu_thread_t* t = spu_find_thread(spu->spu_id);
++                for (int i = 0; t && i < t->evt_bind_n; i++)
++                    if (t->evt_bind[i].spup == port) { queue = t->evt_bind[i].queue; break; }
++            }
+         }
+         result = CELL_ENOTCONN;
+         if (queue) {
+@@ -1650,6 +1672,14 @@
+                 spu->spu_id, ((uint64_t)port << 32) | (value & 0xFFFFFFu), data);
+             result = rc == 0 ? CELL_OK : CELL_EBUSY;
+         }
++        { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_EVTTRACE") ? 1 : 0;
++          if (s_t) { extern uint64_t ps3_system_time_us(void);
++              fprintf(stderr, "[spu-evt] t=%llu spu=0x%X grp=0x%X send_event port=%u data0=0x%06X data1=0x%08X -> queue=%u result=0x%X\n",
++                           (unsigned long long)ps3_system_time_us(),
++                           spu->spu_id, spu->spu_group_id, port, value & 0xFFFFFFu, data, queue, result); } }
++    } else {
++        static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_EVTTRACE") ? 1 : 0;
++        if (s_t) fprintf(stderr, "[spu-evt] spu=0x%X code=%u with an EMPTY out mailbox -> EINVAL\n", spu->spu_id, code);
+     }
+     if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);
+     return 1;
+@@ -1711,6 +1741,11 @@
+      * the group's connected queue. */
+     uint32_t q = 0;
+     spu_thread_t* t = spu_find_thread(spu_id);
++    /* A thread that receives events (bind_queue) writes its plain outbound
++     * mailbox to name the queue for the stop 0x110 that follows: that word is
++     * for lv2, not an event for the PPU. Delivering it woke the PPU's
++     * completion wait with a bogus "SPU done" on every receive. */
++    if (!is_intr && t && t->qbind_n > 0) return;
+     /* lv2 encodes the destination SPU PORT in the top byte of the word an SPU
+      * sends to the PPU: MultiStream's completion word 0x2A000001 is port 0x2A,
+      * which is the queue it bound with connect_event(..., spup=0x2A). Route on
+@@ -2326,6 +2361,10 @@
+             fprintf(stderr, "[SPU] write_snr tid=0x%X snr%u <- 0x%08X (%s)\n",
+                     tid, num + 1, val, or_mode ? "OR" : "overwrite");
+             fflush(stderr); } }
++        { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_EVTTRACE") ? 1 : 0;
++          if (s_t) { extern uint64_t ps3_system_time_us(void);
++              fprintf(stderr, "[spu-snr] t=%llu tid=0x%X snr%u <- 0x%08X\n",
++                      (unsigned long long)ps3_system_time_us(), tid, num + 1, val); } }
+     }
+     ctx->gpr[3] = 0;
+     return 0;
+@@ -2383,6 +2422,103 @@
+     (void)ctx;
+     ctx->gpr[3] = 0;
+     return 0;
++}
++
++/* sys_spu_thread_bind_queue(id, spuq_queue_id, spuq_num) */
++static int64_t sys_spu_thread_bind_queue_handler(ppu_context* ctx)
++{
++    uint32_t tid = (uint32_t)ctx->gpr[3], queue = (uint32_t)ctx->gpr[4];
++    uint32_t spuq = (uint32_t)ctx->gpr[5];
++    spu_thread_t* t = spu_find_thread(tid);
++    if (!t) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH; return 0; }
++    for (int i = 0; i < t->qbind_n; i++)
++        if (t->qbind[i].spuq == spuq) {
++            ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EBUSY; return 0; }
++    if (t->qbind_n >= 8) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EAGAIN; return 0; }
++    t->qbind[t->qbind_n].spuq = spuq;
++    t->qbind[t->qbind_n].queue = queue;
++    t->qbind_n++;
++    fprintf(stderr, "[SPU] bind_queue tid=0x%X queue=%u spuq=0x%X\n", tid, queue, spuq);
++    ctx->gpr[3] = CELL_OK;
++    return 0;
++}
++
++/* sys_spu_thread_unbind_queue(id, spuq_num) */
++static int64_t sys_spu_thread_unbind_queue_handler(ppu_context* ctx)
++{
++    uint32_t tid = (uint32_t)ctx->gpr[3], spuq = (uint32_t)ctx->gpr[4];
++    spu_thread_t* t = spu_find_thread(tid);
++    if (!t) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH; return 0; }
++    for (int i = 0; i < t->qbind_n; i++)
++        if (t->qbind[i].spuq == spuq) {
++            t->qbind[i] = t->qbind[--t->qbind_n];
++            ctx->gpr[3] = CELL_OK; return 0; }
++    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH;
++    return 0;
++}
++
++/* lv2's side of sys_spu_thread_receive_event (stop 0x110) and its try- form
++ * (0x111) for a lifted SPU thread. The SPU wrote its spuq number to the
++ * outbound mailbox and stopped; lv2 receives an event from the queue bound to
++ * that number and resumes the SPU with {CELL_OK, data1, data2, data3} in its
++ * inbound mailbox (RPCS3 sys_spu: the source is not passed). The lifted code
++ * continues after the stop and reads the four words (spu_lifter
++ * _RESUMING_STOP_CODES). Returns 1 when it handled the stop. */
++static int spu_lv2_stop_service(spu_context* sctx)
++{
++    if (sctx->stop_code != 0x110u && sctx->stop_code != 0x111u) return 0;
++    spu_thread_t* t = spu_find_thread(sctx->spu_id);
++    if (!t) return 0;
++    uint32_t spuq = spu_channel_has_data(&sctx->ch_out_mbox)
++                  ? spu_channel_read(&sctx->ch_out_mbox) : 0;
++    uint32_t q = 0;
++    for (int i = 0; i < t->qbind_n; i++)
++        if (t->qbind[i].spuq == spuq) { q = t->qbind[i].queue; break; }
++
++    uint32_t reply[4] = { (uint32_t)CELL_EINVAL, 0, 0, 0 };
++    int nreply = 1;
++    if (q) {
++        ppu_context pc;
++        for (;;) {
++            memset(&pc, 0, sizeof pc);
++            pc.gpr[3] = q;
++            pc.gpr[4] = 0;                                     /* no guest event struct */
++            pc.gpr[5] = (sctx->stop_code == 0x111u) ? 1 : 100000;   /* try: poll once */
++            int64_t rc = sys_event_queue_receive(&pc);
++            if (rc == CELL_OK) {
++                reply[0] = CELL_OK;
++                reply[1] = (uint32_t)pc.gpr[5];
++                reply[2] = (uint32_t)pc.gpr[6];
++                reply[3] = (uint32_t)pc.gpr[7];
++                nreply = 4;
++                break;
++            }
++            /* A blocking receive waits as long as the group runs; the 100 ms
++             * slices only let a terminated group's thread get out. */
++            spu_group_t* g = spu_find_group(t->group_id);
++            if (rc == (int64_t)(int32_t)CELL_ETIMEDOUT && sctx->stop_code == 0x110u &&
++                g && g->state == SPU_GROUP_STATE_RUNNING)
++                continue;
++            reply[0] = (sctx->stop_code == 0x111u && rc == (int64_t)(int32_t)CELL_ETIMEDOUT)
++                     ? (uint32_t)CELL_EBUSY : (uint32_t)rc;
++            break;
++        }
++    }
++    for (int i = 0; i < nreply; i++) sctx->rcv_evt[i] = reply[i];
++    sctx->rcv_evt_i = 0;
++    sctx->rcv_evt_n = nreply;
++    { static int s_n = 0; if (getenv("SPU_RECVTRACE") && s_n++ < 40)
++        fprintf(stderr, "[spu-recv] spu=0x%X spuq=0x%X q=%u -> %08X %08X %08X %08X\n",
++                sctx->spu_id, spuq, q, reply[0], reply[1], reply[2], reply[3]); }
++    { static int on = -1; if (on < 0) on = getenv("SPU_RECVTRACE") ? 1 : 0;
++      if (on) { static unsigned long long t0; static unsigned n;
++        unsigned long long now = GetTickCount64(); if (!t0) t0 = now; n++;
++        if (now - t0 >= 5000) {
++            fprintf(stderr, "[spu-recv-rate] %.1f receives/s (last spu=0x%X q=%u)\n",
++                    n * 1000.0 / (double)(now - t0), sctx->spu_id, q);
++            n = 0; t0 = now; } } }
++    sctx->status = SPU_STATUS_RUNNING;
++    return 1;
+ }
+ 
+ 
+@@ -2515,6 +2651,8 @@
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_CONNECT_EVENT,   sys_spu_thread_connect_event_handler);
+     { extern void (*g_spu_out_mbox_hook)(uint32_t,uint32_t,int,uint32_t);
+       g_spu_out_mbox_hook = ydkj_spu_out_mbox_deliver; }
++    { extern int (*g_spu_stop_hook)(spu_context*);
++      g_spu_stop_hook = spu_lv2_stop_service; }
+     { extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
+       g_spu_user_event_hook = spu_deliver_user_event; }
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_DISCONNECT_EVENT,sys_spu_thread_stub);
+@@ -2526,8 +2664,8 @@
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_stub);
+-    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_stub);
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_BIND_QUEUE,      sys_spu_thread_bind_queue_handler);
++    lv2_syscall_register(tbl, SYS_SPU_THREAD_UNBIND_QUEUE,    sys_spu_thread_unbind_queue_handler);
+     lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CONNECT_EVENT_ALL_THREADS, sys_spu_thread_group_connect_event_all_threads_handler);
+ }
+ 
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -136,6 +136,12 @@
+         fprintf(stderr, "[THREAD %llu] entry RETURNED (r3=0x%llX) -- thread finished\n",
+                 (unsigned long long)info->ctx.thread_id,
+                 (unsigned long long)info->ctx.gpr[3]);
++        /* Give the thread's TLS block back (ppu_loader.cpp), unless it is an
++         * interrupt handler that runs again from its entry. */
++        { extern int ps3_intr_is_handler(unsigned long long);
++          extern void ppu_tls_free_block(uint32_t tp);
++          if (!ps3_intr_is_handler(info->ctx.thread_id))
++              ppu_tls_free_block((uint32_t)info->ctx.gpr[13]); }
+ 
+         /* An established interrupt handler does not finish when its body
+          * returns. lv2 re-enters such a thread at its ENTRY on the next
+--- a/tools/find_spu_functions.py
++++ b/tools/find_spu_functions.py
+@@ -538,6 +538,12 @@
+                       if tok.strip().startswith("0x")]}
+ 
+ 
++# lv2 SPU-thread stop codes that the kernel services and then RESUMES the SPU
++# past: sys_spu_thread_receive_event (0x110) and its try- form (0x111). The
++# code after them reads the reply from the inbound mailbox, so they are not
++# function ends.
++RESUMING_STOP_CODES = {0x110, 0x111}
++
+ # Mnemonics that end a function's fall-through region.
+ _TERMINATORS_NO_FALLTHROUGH = {
+     "stop", "stopd",        # absolute end
+@@ -569,6 +575,9 @@
+             break
+         if is_return(ins):
+             return pc + 4
++        if ins.mnemonic == "stop" and (ins.raw & 0x3FFF) in RESUMING_STOP_CODES:
++            pc += 4                 # lv2 services the stop and the SPU resumes here
++            continue
+         if ins.mnemonic in _TERMINATORS_NO_FALLTHROUGH:
+             # Unconditional control flow -- if the target is not within this
+             # range, the function ends here.
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -3028,6 +3028,30 @@
+                     f"uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
+                     f"for(int i=0;i<8;i++){{uint32_t v=a[i]; d[i]=(uint8_t)(v>255u?255u:v);}} "
+                     f"for(int i=0;i<8;i++){{uint32_t v=b[i]; d[8+i]=(uint8_t)(v>255u?255u:v);}} }}")
++
++        # Pack signed halfword -> unsigned byte, saturating (vpkshus): the
++        # signed counterpart of vpkuhus, clamping to 0..255. vr[] holds
++        # big-endian bytes, so halfword lane i is composed from bytes
++        # [2i, 2i+1]; byte lane i of the result is simply byte i.
++        if mn == "vpkshus":
++            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
++            return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
++                    f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t o[16]; "
++                    f"for(int i=0;i<8;i++){{ int32_t x=(int16_t)((a[i*2]<<8)|a[i*2+1]); "
++                    f"int32_t y=(int16_t)((b[i*2]<<8)|b[i*2+1]); "
++                    f"o[i]=(uint8_t)(x<0?0:x>255?255:x); o[8+i]=(uint8_t)(y<0?0:y>255?255:y); }} "
++                    f"memcpy(&ctx->vr[{vd}], o, 16); }}")
++
++        # vmuleub / vmuloub: multiply the EVEN / ODD unsigned byte lanes into
++        # eight 16-bit products, stored big-endian (halfword j = bytes [2j, 2j+1]).
++        if mn in ("vmuleub", "vmuloub"):
++            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
++            off = 0 if mn == "vmuleub" else 1
++            return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
++                    f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t o[16]; "
++                    f"for(int j=0;j<8;j++){{ uint32_t r=(uint32_t)a[2*j+{off}]*(uint32_t)b[2*j+{off}]; "
++                    f"o[j*2]=(uint8_t)(r>>8); o[j*2+1]=(uint8_t)r; }} "
++                    f"memcpy(&ctx->vr[{vd}], o, 16); }}")
+ 
+         # Pack unsigned word -> unsigned halfword, saturating (vpkuwus)
+         if mn == "vpkuwus":
+@@ -3794,12 +3818,44 @@
+             # at the NEAREST definition of `cand`, so when one exists inside the
+             # window the result is unchanged.
+             for w in reversed(win_cand):
++                if w.addr >= lwzx.addr:
++                    continue                    # the base the table load READ was defined before it:
++                                                # `add r10,r0,r10` after `lwzx r0,r9,r10` reuses the
++                                                # register and is not the base (Imabikisou 0x19BCB4)
+                 a = [x.strip() for x in w.operands.split(',')]
+                 if not a or a[0] != cand or w.mnemonic.startswith(('st', 'lf')):
+                     continue                    # not a GPR def: a store READS it; ppu_disasm names lfs/lfd's FPR target rN
+                 if w.mnemonic in ('lwz', 'ld') and len(a) == 2 and '(r2)' in a[1]:
+                     disp = mem_disp(a[1]); r_base = cand
+                     base_is_ld = (w.mnemonic == 'ld')
++                elif w.mnemonic in ('lwz', 'ld') and len(a) == 2 and a[1].endswith('(r1)'):
++                    # STACK-SPILLED base: `lwz r8,d(r2); std r8,0x100(r1)` ahead of
++                    # a loop, then `ld r10,0x100(r1)` at the dispatch -- the base
++                    # outlives the loop, so gcc keeps it in the frame. Find the
++                    # store to the same slot and resolve the stored register's
++                    # nearest definition before it. (Imabikisou func_0019BB40: a
++                    # 7-case switch dropped this way; case 0x19C358 fell through
++                    # to an unresolved indirect call and the title called abort().)
++                    _slot = mem_disp(a[1])
++                    _seg = _live(_scan_lo(i), i)
++                    _st = None
++                    for _k2 in range(len(_seg) - 1, -1, -1):
++                        _s = _seg[_k2]
++                        _b = [x.strip() for x in _s.operands.split(',')]
++                        if (_s.mnemonic in ('std', 'stw') and len(_b) == 2
++                                and _b[1].endswith('(r1)') and mem_disp(_b[1]) == _slot):
++                            _st = _k2
++                            break
++                    if _st is not None:
++                        _src = [x.strip() for x in _seg[_st].operands.split(',')][0]
++                        for _s in reversed(_seg[:_st]):
++                            _b = [x.strip() for x in _s.operands.split(',')]
++                            if not _b or _b[0] != _src or _s.mnemonic.startswith(('st', 'lf')):
++                                continue
++                            if _s.mnemonic in ('lwz', 'ld') and len(_b) == 2 and '(r2)' in _b[1]:
++                                disp = mem_disp(_b[1]); r_base = cand
++                                base_is_ld = (_s.mnemonic == 'ld')
++                            break               # nearest def wins, TOC load or not
+                 elif w.mnemonic in ('lwz', 'ld') and len(a) == 2 and '(' in a[1]:
+                     # TWO-LEVEL base: `lwz r30, d1(r2); lwz r11, d2(r30)`. The
+                     # table address is not in the TOC itself but in a global the
+--- a/tools/spu_lifter.py
++++ b/tools/spu_lifter.py
+@@ -49,6 +49,11 @@
+ import re
+ import sys
+ from dataclasses import dataclass, field
++
++# lv2 SPU-thread stop codes the kernel services and then resumes the SPU past
++# (sys_spu_thread_receive_event and its try- form). Kept in step with
++# find_spu_functions.RESUMING_STOP_CODES, which does not end a function there.
++_RESUMING_STOP_CODES = {0x110, 0x111}
+ 
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ 
+@@ -524,7 +529,9 @@
+         # into the next sequential function. Emit a tail-call so the chain isn't
+         # truncated (this was silently dropping execution mid-job).
+         _TERMINATORS = {"br", "bra", "bi", "iret", "stop", "stopd"}
+-        if (last_insn is not None and last_insn.mnemonic not in _TERMINATORS
++        _resumes = (last_insn is not None and last_insn.mnemonic == "stop"
++                    and (last_insn.raw & 0x3FFF) in _RESUMING_STOP_CODES)
++        if (last_insn is not None and (last_insn.mnemonic not in _TERMINATORS or _resumes)
+                 and end in getattr(self, "func_starts", set())):
+             func.body_lines.append(
+                 f"    {{ ctx->pc = 0x{end:X}; "
+@@ -610,6 +617,16 @@
+         if mn == "stop":
+             # Preserve the 14-bit stop-and-signal code: SPURS leaf tasks use
+             # `stop <code>` to invoke kernel syscalls (EXIT/YIELD/WAIT_SIGNAL/...).
++            code = insn.raw & 0x3FFF
++            if code in _RESUMING_STOP_CODES:
++                # sys_spu_thread_receive_event: lv2 services it (spu_stop puts
++                # the reply in the inbound mailbox and sets the SPU RUNNING) and
++                # the SPU continues with the next instruction, which reads it.
++                # Returning here dropped those reads and handed the caller
++                # whatever was left in $r3.
++                return (f"ctx->stop_code = 0x{code:X}u; "
++                        f"ctx->status = SPU_STATUS_STOPPED_BY_STOP; spu_stop(ctx); "
++                        f"if (ctx->status != SPU_STATUS_RUNNING) return;")
+             return (f"ctx->stop_code = 0x{insn.raw & 0x3FFF:X}u; "
+                     f"ctx->status = SPU_STATUS_STOPPED_BY_STOP; spu_stop(ctx); return;")
+ 

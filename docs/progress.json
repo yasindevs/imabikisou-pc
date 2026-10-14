@@ -1,0 +1,44 @@
+{
+  "updated": "2026-10-14",
+  "method": "Weighted planning estimates, not measured game-wide compatibility.",
+  "translation_total": 19018,
+  "translation_draft": 33,
+  "ui_labels_draft": 27,
+  "streams": [
+    {
+      "label": "Boot & runtime",
+      "percent": 90,
+      "weight": 10
+    },
+    {
+      "label": "Graphics & pacing",
+      "percent": 65,
+      "weight": 20
+    },
+    {
+      "label": "Input & save/load",
+      "percent": 65,
+      "weight": 10
+    },
+    {
+      "label": "Audio",
+      "percent": 35,
+      "weight": 15
+    },
+    {
+      "label": "Movies",
+      "percent": 35,
+      "weight": 15
+    },
+    {
+      "label": "Full-game validation",
+      "percent": 10,
+      "weight": 20
+    },
+    {
+      "label": "English story draft",
+      "percent": 0.1735198233252708,
+      "weight": 10
+    }
+  ]
+}

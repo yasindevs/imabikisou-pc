@@ -1,79 +1,125 @@
-# Imabikisō PC port tools
+<div align="center">
 
-Tools to run **Imabikisō** (忌火起草, Chunsoft, PS3, `BLJM60042`) on PC from **your own copy** of the game, with
-fan translations planned.
+# Imabikisō · PC Recompilation
 
-> **This repository contains no game data.** No images, audio, video, fonts or script text from the game are
-> distributed here. Everything is read at runtime from a disc image you dumped yourself. Do not open issues or
-> pull requests containing game files, and do not ask for or share ISOs.
+**Bringing 忌火起草 to PC, with an experimental machine-translated English edition.**
 
-## Status
+An independent, community-led project built with [ps3recomp](https://github.com/sp00nznet/ps3recomp).
 
-| Part | State |
+**Windows prototype · Early scenes running · English preview · Work in progress**
+
+[Progress](#progress) · [What works](#what-works-today) · [Build & source](#code-and-building) · [English translation](#english-machine-translation) · [Roadmap](docs/roadmap.md) · [Contributing](CONTRIBUTING.md)
+
+</div>
+
+---
+
+Imabikisō is a Japanese horror visual novel from Chunsoft. This project explores running the PS3 release **BLJM60042 / 01.00** as a native PC program through static recompilation, alongside tools for extracting, understanding and patching its scripts.
+
+The current prototype boots, renders the opening and reaches the first classroom narration. A separate English preview replaces some menus and opening text. **This is an experimental developer build, not a finished port or a verified full playthrough.**
+
+No game executable, generated game code, disc image, fonts, sound or video is included. You need your own game dump and locally generated files to build and run the native port.
+
+## Progress
+
+![Development progress: estimated overall engineering readiness 41%; detailed breakdown below](docs/assets/progress.png)
+
+**Updated: 14 October 2026.** The chart is a planning estimate based on the milestones below. It is **not** an automated compatibility score, a percentage of the story that is playable, or a release-date prediction. Full-game compatibility remains largely untested.
+
+| Workstream | Estimate | Current evidence | Still to do |
+|---|---:|---|---|
+| Boot & runtime | 90% | Startup, system callbacks, fonts and initial loading run | Regression tests and less common system paths |
+| Graphics & pacing | 65% | Opening and classroom render; about 57–60 presentations/s in sampled scenes | Wider effects coverage, unique-frame pacing, scene regressions |
+| Input & save/load | 65% | Keyboard/controller confirmation and early save/load exercised | Longer sessions, all menus and save-slot edge cases |
+| Audio | 35% | Audio plays; device output keeps its nominal rate | Crackling, upstream PCM interruptions and synchronization |
+| Movies | 35% | Opening movies decode and display | Remaining stutters, decode deadlines and A/V timing |
+| Full-game validation | 10% | Opening and first classroom tested | Branches, routes, endings, long-session stability |
+| English story coverage | 0.17% draft | 33 of 19,018 exported script entries; 27 UI labels separately | Machine translation, layout checks, context and terminology review |
+
+Overall **41%** is a weighted planning score, rounded to a whole number. It deliberately gives substantial weight to audio, movies and full-game testing. [Weights and definitions](docs/roadmap.md#how-the-percentages-work) · [Source data](docs/progress.json).
+
+## What works today
+
+- PS3 startup proceeds through the early initialization barriers and system callbacks.
+- The live renderer displays the opening, backgrounds and first story text.
+- Font handling, text encoding and callback thread-local state have been corrected for the tested paths.
+- Input responds after a pad capability structure fix. Japanese confirmation uses **Circle**.
+- Early save data is written and loaded with the correct filename.
+- A separate English preview displays the title-menu labels, prologue and first classroom lines.
+- The script tools can read archives, export stable text IDs and rebuild a translated script archive with structural checks.
+
+## Known problems
+
+**Audio crackling and movie stutters are still present.** A near-60 presentation rate does not mean every movie frame is decoded on time. Interruptions also appear in the recorded PCM before device output, so a larger speaker buffer alone does not resolve them.
+
+The rest of the game has not been validated. Later effects, menus, choices, routes and long sessions may expose rendering errors, freezes or crashes. Some UI text is stored in images and remains Japanese. There is no release date yet.
+
+See the [roadmap](docs/roadmap.md) for the next milestones and what must pass before a playable release.
+
+## English machine translation
+
+The planned English edition will use **machine translation assisted by AI**. It will be labeled as such; it is not an official localization or a professional human translation.
+
+The current preview contains **33 draft script entries and 27 menu/dialog labels**. That is a small technical and layout test, not a translated game. Story coverage is calculated from the 19,018 exported main-script entries; menu labels are counted separately because the full UI inventory is not complete.
+
+The intended workflow is to translate by stable script ID, preserve control instructions, use a consistent glossary, and check the result in-game for overflow, missing glyphs and broken choices. Human corrections are welcome. The English files load from a separate local preview directory with separate saves/settings.
+
+[English preview text](translations/en/preview.json) · [Translation workflow](translations/README.md) · [Patching documentation](docs/patching.md)
+
+## Code and building
+
+| Directory | Contents |
 |---|---|
-| Reading the game straight from the `.iso` (ISO 9660), or from a folder | ✅ |
-| CRI AFS archives (list / extract) | ✅ |
-| Main script `st.sns` (CSD-CSCNV 01.68): decryption, container, resource tables | ✅ |
-| Main script `st.sns`: bytecode structure, labels, line export (19,018 lines) | ✅ structure, 🚧 opcode semantics |
-| Secondary script `scenario.sn4` (ScenarioLink): bytecode, label table, line export | ✅ structure, 🚧 opcode semantics |
-| Engine prototype `imbk_player` (Windows): pictures, transitions, text in the game's font | 🚧 playable, linear |
-| Engine: sound, movies, choices and flags, effects | ⏳ |
-| Translation patch: `imbk patch` rebuilds the main script and `residentchunk.afs` | ✅ verified offline, 🚧 in-game test |
+| [`src/`](src/) | C++ archive, script and translation tools; an earlier linear player prototype |
+| [`native/`](native/) | Native port runner, ABI bridges and CMake integration |
+| [`patches/ps3recomp/`](patches/ps3recomp/) | Local runtime/lifter fixes against a pinned upstream commit |
+| [`translations/`](translations/) | English draft text and workflow |
+| [`docs/`](docs/) | Format research, progress data and technical notes |
+| [`tools/`](tools/) | Progress-chart generation and diagnostics |
 
-Docs (in French for now): [docs/engine.md](docs/engine.md), [docs/opcodes.md](docs/opcodes.md), [docs/patching.md](docs/patching.md), [docs/sns-format.md](docs/sns-format.md),
-[docs/sn4-format.md](docs/sn4-format.md).
+### Build the asset and translation tools
 
-## Building
-
-Requirements: CMake ≥ 3.20 and a C++20 compiler (GCC 13+, Clang 16+ or MSVC 2022).
+Requirements: CMake 3.20+, a C++20 compiler and Ninja (or another CMake generator). Non-Windows builds also need Iconv.
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build
+ctest --test-dir build --output-on-failure
 ```
-
-On Linux/macOS the build also needs `iconv` (part of glibc/libSystem).
-
-## Usage
 
 ```sh
-imbk verify  "Imabikisou (Japan).iso"         # check that your dump is the supported release
-imbk info    "Imabikisou (Japan).iso"         # metadata and archive overview
-imbk ls      "Imabikisou (Japan).iso" bgm.afs
-imbk extract "Imabikisou (Japan).iso" out/ scriptchunk.afs
-imbk sns info    "Imabikisou (Japan).iso"
-imbk sns text    "Imabikisou (Japan).iso" out/lines.tsv
-imbk sns disasm  "Imabikisou (Japan).iso" out/script.txt
-imbk sns decrypt "Imabikisou (Japan).iso" out/st.sns.dec
-imbk sn4 text    "Imabikisou (Japan).iso" out/sn4_lines.tsv   # older secondary script
-
-# Engine prototype (Windows): plays the story from a scene label (see docs/engine.md)
-imbk_player "Imabikisou (Japan).iso" S00A_0000_0100
-
-# Translation patch, tested in RPCS3 (see docs/patching.md)
+imbk verify "Imabikisou (Japan).iso"
+imbk sns text "Imabikisou (Japan).iso" out/lines.tsv
 imbk unpack "Imabikisou (Japan).iso" out/disc
-imbk patch  "Imabikisou (Japan).iso" out/my_translation.tsv out/disc
+imbk patch "Imabikisou (Japan).iso" out/translation.tsv out/disc
 ```
 
-`<game>` can also be a folder that contains `PS3_GAME/` (a mounted disc or an extracted copy).
+These commands build the tools, **not the native game executable**. `imbk_player` is the earlier linear prototype and is distinct from the ps3recomp-based port.
 
-Files written by these commands contain game content. They are for your own use and are covered by
-`.gitignore`. Never commit them.
+### Build the native port
 
-### Line IDs
+The tested configuration is **Windows x64, Direct3D 12, clang-cl and an AVX2-capable CPU**. Other configurations are not validated by this project.
 
-`imbk sns text` gives every line of the script a stable ID: the game's own message ID for dialogue
-(`__1_17`), or `<scene label>#<n>` for narration (`S00A_0000_0100#2`). Translation files will refer to lines by ID only, so they can be shared without
-including any of the original Japanese text.
+The public sources require your locally decrypted ELF and locally lifted PPU/SPU sources; those are intentionally excluded. The SDK changes are pinned to `a2c20108af45174dbb7d3e2f87f6acaaef09c6b4`. This is a developer workflow, not a one-click installer.
 
-## Supported release
+Follow [native/README.md](native/README.md) for patch application, private inputs, configuration and controls.
 
-| Title ID | Version | `st.sns` CRC32 | `scenario.sn4` CRC32 |
-|---|---|---|---|
-| BLJM60042 | 01.00 | `C83EFAFA` | `3E472406` |
+## Next milestones
 
-## License
+- [ ] Eliminate the reproducible audio interruptions in the opening jingle.
+- [ ] Keep movie decoding and sound synchronized through demanding sections.
+- [ ] Validate longer play sessions, choices and save/load regressions.
+- [ ] Extend the English machine-translation pipeline with glossary and layout checks.
+- [ ] Record a representative progress video with the current limitations clearly identified.
 
-The code in this repository is MIT-licensed (see [LICENSE](LICENSE)). Imabikisō and all of its content belong to
-their respective rights holders. This project is not affiliated with or endorsed by them.
+## People, tools and acknowledgements
+
+This is a human-directed project developed with assistance from **ChatGPT / Codex (OpenAI)** and **Claude Opus (Anthropic)** for code, reverse-engineering analysis, debugging and translation experiments. AI assistance does not imply endorsement by either company, and generated suggestions still need testing and review.
+
+Special thanks to **sp00nznet and the ps3recomp contributors** for the recompilation framework, and to the original creators of Imabikisō. Additional testing, technical contributions and corrections are welcome.
+
+## License and game files
+
+Project code is MIT-licensed; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Imabikisō and its content belong to their respective rights holders. This is an unofficial project with no affiliation or endorsement.
+
+Please do not upload game files, extracted assets, complete script dumps or generated game sources to issues or pull requests.

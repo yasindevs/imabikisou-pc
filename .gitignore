@@ -25,6 +25,26 @@ PS3_DISC.SFB
 /dump/
 *.tsv
 
+# Private native-port inputs, generated game code, saves and diagnostics
+/native/recompiled/
+/native/spu/
+/private/
+/game/
+/recomp/
+/spu_programs/
+/gamedata/
+/runs/
+*.elf
+*.ELF
+*.self
+*.SELF
+*.prx
+*.sprx
+*.f32
+*.before-*
+/build-native/
+__pycache__/
+
 # Build
 /build/
 /build-*/
