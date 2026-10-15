@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <chrono>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -148,24 +149,37 @@ double psnr(const uint8_t* a, const uint8_t* b, size_t n)
 } // namespace
 
 /* Sofdec's picture decode on the "SPU Delegate" threads (lifted image 5,
- * spu_0004): the task dispatcher at LS 0xB00 calls the task body through a
- * pointer -- LS 0x20458, returning to 0xB28 -- then reports completion from
- * 0xC00/0xC20. With every playing movie decoded natively that body is wasted
- * work (~50 ms per half picture on the heavy movies) and the reason Sofdec
- * fell behind, so the call returns at once. IMBK_MOVIE_SKIP_SPU=0 keeps it. */
+ * spu_0004) is ~4x too slow for the heavy movies. While every playing movie
+ * is decoded natively its pixels are thrown away, so the decoder keeps all of
+ * its parsing and bookkeeping (bitstream, headers, time stamps, frame pool)
+ * and only drops the pixel work:
+ *  - IDCT leaves, reached by indirect branch: skipped here (g_spu_ib_skip);
+ *  - motion compensation, reference fetches, intra packing and macroblock
+ *    output: early returns in the lifted code while g_imbk_spu_pixel_skip is
+ *    set (tools/apply_spu_movie_skip.py).
+ * The previous skip of LS 0x20458 (link 0xB28) turned out to be the stream
+ * reset of each task: the decoder then ran on stale buffer state, and Sofdec
+ * stopped presenting frames a few seconds into the opening.
+ * IMBK_MOVIE_SKIP_SPU=0 keeps the full SPU decode. */
 extern "C" int (*g_spu_ib_skip)(void* ctx, uint32_t target, uint32_t link);
+extern "C" int spu_ctx_image_id(const void* ctx);
+extern "C" volatile int g_imbk_spu_pixel_skip = 0;
 static std::atomic<int> g_native_active{0}; /* every started handle is native (written under g_mu) */
+static int g_skip_enabled = 0;
 static int ib_skip(void* ctx, uint32_t target, uint32_t link)
 {
-    (void)ctx;
-    return target == 0x20458u && link == 0xB28u && g_native_active.load(std::memory_order_acquire);
+    if (!g_native_active.load(std::memory_order_acquire) || spu_ctx_image_id(ctx) != 5) return 0;
+    return (target == 0x1D0F8u && (link == 0x1CEC0u || link == 0x1D0C8u)) ||   /* DC-only IDCT */
+           (target == 0x1D528u && (link == 0x1CF1Cu || link == 0x1D07Cu));     /* full IDCT */
 }
 
 static void update_native_active()
 {
     bool all = !g_movies.empty() && g_pending.empty();
     for (auto& kv : g_movies) if (!kv.second.mv) all = false;
-    g_native_active.store(all && mode() == 1, std::memory_order_release);
+    const int on = all && mode() == 1;
+    g_native_active.store(on, std::memory_order_release);
+    g_imbk_spu_pixel_skip = on && g_skip_enabled;
 }
 
 extern "C" void imbk_movie_install(void)
@@ -173,7 +187,7 @@ extern "C" void imbk_movie_install(void)
     if (!mode()) return;
     g_ps3_fs_read_hook = fs_read_hook;
     const char* e = getenv("IMBK_MOVIE_SKIP_SPU");
-    if (!(e && *e == '0')) g_spu_ib_skip = ib_skip;
+    if (!(e && *e == '0')) { g_spu_ib_skip = ib_skip; g_skip_enabled = 1; }
 }
 
 /* mwPlyStartAfs / StartAfsLp / EntryAfs */
@@ -214,6 +228,18 @@ extern "C" int imbk_movie_on_convert(uint32_t hn, uint32_t cnvobj)
     };
     const uint32_t buf = rd(cnvobj + 0x00);
     int frame = (int)rd(cnvobj + 0x04);
+    /* IMBK_MOVIE_RATE=1: once a second, conversions done and the frame shown. */
+    { static int on = -1; static unsigned n = 0; static std::chrono::steady_clock::time_point t0{};
+      if (on < 0) on = getenv("IMBK_MOVIE_RATE") ? 1 : 0;
+      if (on) {
+          ++n;
+          const auto now = std::chrono::steady_clock::now();
+          if (t0.time_since_epoch().count() == 0) t0 = now;
+          if (now - t0 >= std::chrono::seconds(1)) {
+              fprintf(stderr, "[movie-rate] hn=0x%08X %u conv/s frame=%d\n", hn, n, frame);
+              n = 0; t0 = now;
+          }
+      } }
     const int w = imbk_movie_width(m.mv), h = imbk_movie_height(m.mv);
     if (w != 1280 || h != 720 || buf < 0x10000u || frame < 0) return 0;
     if (m.frames > 0) frame %= m.frames;

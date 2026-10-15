@@ -24,6 +24,9 @@ PS3_DISC.SFB
 /extracted/
 /dump/
 *.tsv
+# ...except the released translation files (English text and ELF offsets only)
+!/translations/*/story.tsv
+!/translations/*/menu.tsv
 
 # Private native-port inputs, generated game code, saves and diagnostics
 /native/recompiled/

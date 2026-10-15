@@ -9,6 +9,11 @@ Upstream: https://github.com/sp00nznet/ps3recomp
 `native/third_party/pl_mpeg/pl_mpeg.h` -- MPEG-1 video decoder by Dominic Szablewski (phoboslab),
 https://github.com/phoboslab/pl_mpeg, MIT license (see the header of that file).
 
+## Dear ImGui
+
+`launcher/third_party/imgui/` -- Dear ImGui 1.91.9 by Omar Cornut,
+https://github.com/ocornut/imgui, MIT license (see `launcher/third_party/imgui/LICENSE.txt`).
+
 ## ps3recomp license
 
 MIT License

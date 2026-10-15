@@ -52,7 +52,7 @@
     },
     {
       "path": "libs/video/rsx_live_draw.c",
-      "patched_sha256_lf": "6d960822d39d4b4e60daa3963816ad5c655a91808ab255b42e38f9def2e9ec51"
+      "patched_sha256_lf": "650ef120cd5b570138eddd2ccfdc11c07edb462ad0e8d7e1bbcee5f9c5908589"
     },
     {
       "path": "runtime/ppu/ppu_fs.cpp",
@@ -72,7 +72,7 @@
     },
     {
       "path": "runtime/spu/spu_channels.c",
-      "patched_sha256_lf": "a278c64db0feedc62e9891f2d4b512acf4f2a09a26cb5977460228c02c969b5f"
+      "patched_sha256_lf": "881d5d67b2a68b576e26bc744ac2ac9bd2cce5c87fa48b061ad7c3a456337579"
     },
     {
       "path": "runtime/spu/spu_coherency.c",
@@ -108,7 +108,7 @@
     },
     {
       "path": "runtime/syscalls/sys_ppu_thread.c",
-      "patched_sha256_lf": "c9881197f05157d8ddb180af0a8f81af982a0db74a1bfa8db0b3773fe7ceef45"
+      "patched_sha256_lf": "f61e719da60e9a4072990c26d734d9b48a8cf302c34d1fe431dbc6ec8755c561"
     },
     {
       "path": "tools/find_spu_functions.py",

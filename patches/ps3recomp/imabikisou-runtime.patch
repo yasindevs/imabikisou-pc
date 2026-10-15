@@ -1023,7 +1023,16 @@
  s32 cellRescSetVBlankHandler(void (*handler)(u32));
 --- a/libs/video/rsx_live_draw.c
 +++ b/libs/video/rsx_live_draw.c
-@@ -1233,6 +1233,18 @@ static void ld_vertex_diag_emit(const char* reason, int dump_surface);
+@@ -426,6 +426,8 @@ static const char* ld_fp_constant_mode_name(void)
+ 
+ static int g_ld_dred_dumped = 0;
+ static u32 g_ld_frames = 0;
++/* Presented-frame count, for the port's hang watchdog. */
++u32 rsx_ld_frame_count(void) { return g_ld_frames; }
+ static ID3D12InfoQueue* g_ld_info_queue = NULL;
+ static int g_ld_debug_layer_enabled = 0;
+ 
+@@ -1233,6 +1235,18 @@ static void ld_vertex_diag_emit(const char* reason, int dump_surface);
  /* ---------------------------------------------------------------------------
   * enable gate
   * -----------------------------------------------------------------------*/
@@ -1042,7 +1051,7 @@
  int rsx_live_draw_enabled(void)
  {
      static int cached = -1;
-@@ -2086,8 +2098,16 @@ static u64 texture_content_hash(const rsx_dsp_texture* t, int* readable)
+@@ -2086,8 +2100,16 @@ static u64 texture_content_hash(const rsx_dsp_texture* t, int* readable)
       * Counting non-zero SOURCE bytes covers every format and separates "the
       * upload never happened" from "decode ate it". */
      { static int ts = -1; static int tsn = 0;
@@ -1061,7 +1070,7 @@
            u32 nz = 0;
            for (u32 q = 0; q < span; q++) if (src[q]) nz++;
            char head[80]; int hn = 0;
-@@ -2329,7 +2349,12 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
+@@ -2329,7 +2351,12 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
            /* No size floor: the floor was picked for one title's full-screen
             * textures and silently skipped every UI atlas, which is the size
             * a 2D layer is made of. The dump is opt-in; dump what was asked. */
@@ -1075,7 +1084,7 @@
                u64 nb = 0, na = 0;
                for (u32 q = 0; q < mw * mh; q++) {
                    const u8* px = rgba[n] + (size_t)q * 4;
-@@ -2337,8 +2362,8 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
+@@ -2337,8 +2364,8 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
                    if (px[3] > 0x1A) na++;
                }
                char fn[160];
@@ -1086,7 +1095,7 @@
                FILE* tf = fopen(fn, "wb");
                if (tf) {
                    fprintf(tf, "P6\n%u %u\n255\n", mw, mh);
-@@ -2351,7 +2376,7 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
+@@ -2351,7 +2378,7 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
                        fn, base_fmt, remap, linear, pitch,
                        (unsigned long long)nb, mw * mh, (unsigned long long)na);
                tdn++;
@@ -1095,7 +1104,7 @@
          levels[n].w = mw;
          levels[n].h = mh;
          levels[n].data = rgba[n];
-@@ -5989,11 +6014,13 @@ static void live_draw_csv_emit(u32 prim, u32 n_tri, const char* outcome)
+@@ -5989,11 +6016,13 @@ static void live_draw_csv_emit(u32 prim, u32 n_tri, const char* outcome)
      /* LD_DRAW_DUMP=<dir> [LD_DRAW_DUMP_EVERY=k, default 10]: in the first
       * gated frame, read back each k-th draw's target BEFORE it is recorded,
       * named by frame-relative index -- bisects which draw changes a surface. */
@@ -1112,7 +1121,7 @@
            (idx % every) == 0) {
            dumped_frame = frame;
            char path[MAX_PATH * 2];
-@@ -6893,6 +6920,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+@@ -6893,6 +6922,24 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
                }
            }
        } }
@@ -1137,7 +1146,7 @@
      for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
          rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
          /* LD_PS1_BUF0=1 -- DIAGNOSTIC, not a fix. Force a 24-bit PS1 VRAM
-@@ -8322,7 +8367,7 @@ void rsx_live_draw_present_rgba(const uint8_t* rgba, u32 w, u32 h)
+@@ -8322,7 +8369,7 @@ void rsx_live_draw_present_rgba(const uint8_t* rgba, u32 w, u32 h)
  
      ld_flush(LD_FLUSH_MOVIE_PRESENT);
      {
@@ -1146,7 +1155,7 @@
          if (SUCCEEDED(present_hr))
              ld_present_measure_record(g_ld_frames);
          else {
-@@ -8866,7 +8911,7 @@ void rsx_live_draw_present(u32 buffer_id)
+@@ -8866,7 +8913,7 @@ void rsx_live_draw_present(u32 buffer_id)
  
      ld_flush(LD_FLUSH_PRESENT);
      {
@@ -1393,7 +1402,7 @@
  #endif
  #include <time.h>
  #include "../platform/win32_compat.h"
-@@ -55,6 +56,91 @@ static uint64_t spu_host_ns(void)
+@@ -55,6 +56,93 @@ static uint64_t spu_host_ns(void)
  #endif
  }
  
@@ -1412,6 +1421,8 @@
 +static SPU_THREAD_LOCAL int t_task_dma_left;      /* SPU_TASK_DMA */
 +/* Port hook: nonzero = skip this indirect call (see spu_indirect_branch). */
 +int (*g_spu_ib_skip)(spu_context* ctx, uint32_t target, uint32_t link) = 0;
++/* For g_spu_ib_skip hooks outside the runtime: which lifted image runs. */
++int spu_ctx_image_id(const void* ctx) { return ((const spu_context*)ctx)->image_id; }
 +static void spu_llar_backoff(uint32_t ea, const void* mem)
 +{
 +    static int s_on = -1;
@@ -1485,7 +1496,7 @@
  /* ---------------------------------------------------------------------------
   * Clean SPU job abort (longjmp). The `br .` halt idiom and other terminal
   * spins can't be escaped by setting a status flag (lifted code never checks
-@@ -173,6 +259,10 @@ void spu_dbg_e60(spu_context* ctx)
+@@ -173,6 +261,10 @@ void spu_dbg_e60(spu_context* ctx)
      fflush(stderr);
  }
  
@@ -1496,7 +1507,7 @@
  /* SPU `stop` / stop-and-signal. A real SPU stop HALTS the core; the previous
   * lifted emission only did `status=...; return;`, which unwound ONE frame and
   * let the caller's service loop keep running -- so a SPURS policy doing
-@@ -193,6 +283,9 @@ void spu_stop(spu_context* ctx)
+@@ -193,6 +285,9 @@ void spu_stop(spu_context* ctx)
      static int s_halt = -1;
      if (s_halt < 0) s_halt = getenv("YDKJ_STOP_HALT") ? 1 : 0;
      ctx->status = SPU_STATUS_STOPPED_BY_STOP;
@@ -1506,7 +1517,7 @@
      if (s_halt) spu_halt(ctx);
  }
  
-@@ -532,6 +625,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+@@ -532,6 +627,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
        } }
      switch (cmd) {
      case MFC_GETLLAR_CMD:
@@ -1514,7 +1525,7 @@
          /* Lockstep tick: a guest GETLLAR..PUTLLC poll loop is intra-function
           * (all gotos), so it never crosses the SPU_DRAIN tick site -- without a
           * tick here a polling SPU would hold the run token forever while the
-@@ -692,6 +786,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
+@@ -692,6 +788,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                                  n, ctx->image_id, (void*)ctx, ea,
                                  w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); } } }
              spu_coh_notify_write(ea);
@@ -1522,7 +1533,7 @@
              ctx->atomic_stat = 0;                      /* PUTLLC_SUCCESS */
          } else {
              ctx->atomic_stat = 1;                      /* PUTLLC_FAILURE -> retry */
-@@ -793,6 +888,30 @@ static int channel_is_mfc(uint32_t ch)
+@@ -793,6 +890,30 @@ static int channel_is_mfc(uint32_t ch)
   * ===========================================================================*/
  void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
  {
@@ -1553,7 +1564,7 @@
      /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
       * worker that never issues an MFC command is either not being handed its
       * work descriptor or is waiting on a channel we never satisfy; the channel
-@@ -860,6 +979,7 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+@@ -860,6 +981,7 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
          { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_MBOXTRACE") ? 1 : 0;
            if (s_t) fprintf(stderr, "[spu-mbox] INTR grp=0x%X spu=0x%X val=0x%08X\n",
                             ctx->spu_group_id, ctx->spu_id, v); }
@@ -1561,7 +1572,7 @@
          if (g_spu_user_event_hook && g_spu_user_event_hook(ctx, v)) break;
          spu_channel_write(&ctx->ch_out_intr_mbox, v);
          if (g_spu_out_mbox_hook) g_spu_out_mbox_hook(ctx->spu_group_id, ctx->spu_id, 1, v);
-@@ -1043,7 +1163,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+@@ -1043,7 +1165,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
          if (ctx->rcv_evt_n > 0) { v = ctx->rcv_evt[ctx->rcv_evt_i++]; ctx->rcv_evt_n--; }
          else v = spu_channel_read(&ctx->ch_in_mbox);
          break;
@@ -1573,7 +1584,7 @@
      case SPU_RdSigNotify2:  v = spu_channel_read(&ctx->ch_sig_notify[1]); break;
      /* The decrementer must actually DECREMENT. Returning the latched WrDec
       * value verbatim makes every `rdch $ch8` deadline poll spin forever: the
-@@ -1082,6 +1205,27 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+@@ -1082,6 +1207,27 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
      return spu_make_preferred_u32(v);
  }
  
@@ -1601,7 +1612,7 @@
  /* ===========================================================================
   * Channel count (rchcnt) -- how many entries can be read/written right now
   * ===========================================================================*/
-@@ -1236,6 +1380,8 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1236,6 +1382,8 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
              extern void spu_halt(spu_context*);
              spu_halt(ctx);
          }
@@ -1610,7 +1621,7 @@
          return (uint32_t)ctx->rcv_evt_n + ctx->ch_in_mbox.count;           /* readable */
      /* Free slots, CLAMPED. The queue behind each channel is SPU_CHANNEL_CAP
       * deep -- deeper than the hardware depth reported here -- so `count` can
-@@ -2057,6 +2203,29 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2057,6 +2205,29 @@ void spu_indirect_branch(spu_context* ctx)
       * and falls into branch-to-0. All lifted funcs live below SPU_LS_SIZE, so
       * masking is a no-op for already-valid targets. */
      ctx->pc &= SPU_LS_MASK;
@@ -2274,6 +2285,24 @@
  
          /* An established interrupt handler does not finish when its body
           * returns. lv2 re-enters such a thread at its ENTRY on the next
+@@ -1303,3 +1309,17 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
+     lv2_syscall_register(tbl, SYS_PPU_THREAD_GET_STACK_INFORMATION, sys_ppu_thread_get_stack_information);
+     lv2_syscall_register(tbl, SYS_PPU_THREAD_RENAME,              sys_ppu_thread_rename);
+ }
++
++/* Guest view of a hang, for a port's field reports: where each PPU thread is.
++ * lr is the return address of its last call, prof_pc its last syscall/HLE
++ * call site -- for a thread blocked in a wait, the call that blocks. */
++void ppu_threads_report(void)
++{
++    for (int i = 0; i < PPU_THREAD_MAX; ++i) {
++        const ppu_thread_info* t = &g_ppu_threads[i];
++        if (t->state != PPU_THREAD_STATE_RUNNING && t->state != PPU_THREAD_STATE_DETACHED) continue;
++        fprintf(stderr, "[report] ppu %2d %-28s syscall_site=0x%08X lr=0x%08llX cia=0x%08llX r3=0x%llX\n",
++                i, t->name, t->prof_pc, (unsigned long long)t->ctx.lr,
++                (unsigned long long)t->ctx.cia, (unsigned long long)t->ctx.gpr[3]);
++    }
++}
 --- a/tools/find_spu_functions.py
 +++ b/tools/find_spu_functions.py
 @@ -538,6 +538,12 @@ def collect_brsl_targets(insns):

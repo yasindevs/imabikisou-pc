@@ -466,6 +466,73 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
 
 extern "C" void imbk_register_font_bridge();
 
+#ifdef _WIN32
+#include <dbghelp.h>
+#include <thread>
+extern "C" uint32_t rsx_ld_frame_count(void);
+extern "C" void ppu_threads_report(void);  /* sys_ppu_thread.c */
+
+
+/* Field reports: a crash, or no presented frame for IMBK_HANG_SECS seconds
+ * (default 15, 0 = off), writes a minidump -- every thread's registers and
+ * stack -- to IMBK_DUMP_DIR (default: the working directory). The stacks are
+ * resolved against the build's linker map. */
+static void imbk_write_dump(const char* why, EXCEPTION_POINTERS* ep)
+{
+    static volatile LONG once = 0;
+    if (InterlockedExchange(&once, 1)) return;
+    const char* dir = getenv("IMBK_DUMP_DIR");
+    char path[MAX_PATH];
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    snprintf(path, sizeof path, "%s%s%s-%04u%02u%02u-%02u%02u%02u.dmp", dir ? dir : "", dir ? "\\" : "", why,
+             t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    MINIDUMP_EXCEPTION_INFORMATION xi{GetCurrentThreadId(), ep, FALSE};
+    const BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f,
+                                      (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
+                                      ep ? &xi : nullptr, nullptr, nullptr);
+    CloseHandle(f);
+    fprintf(stderr, "[report] %s: %s %s\n", why, ok ? "wrote" : "could not write", path);
+    ppu_threads_report();
+}
+
+static LONG WINAPI imbk_crash_filter(EXCEPTION_POINTERS* ep)
+{
+    fprintf(stderr, "[report] unhandled exception 0x%08lX at %p\n",
+            ep->ExceptionRecord->ExceptionCode, ep->ExceptionRecord->ExceptionAddress);
+    imbk_write_dump("crash", ep);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void imbk_start_reports()
+{
+    SetUnhandledExceptionFilter(imbk_crash_filter);
+    const char* e = getenv("IMBK_HANG_SECS");
+    const int secs = e ? atoi(e) : 15;
+    if (secs <= 0) return;
+    const char* te = getenv("IMBK_REPORT_TEST");   /* write a "test" dump after N s */
+    const int test = te ? atoi(te) : 0;
+    std::thread([secs, test] {
+        uint32_t last = rsx_ld_frame_count();
+        int still = 0, elapsed = 0;
+        for (;;) {
+            Sleep(1000);
+            if (test && ++elapsed == test) imbk_write_dump("test", nullptr);
+            const uint32_t now = rsx_ld_frame_count();
+            /* Only after the first frames: loading the ELF is not a hang. */
+            still = (now == last && now > 0) ? still + 1 : 0;
+            last = now;
+            if (still == secs) {
+                fprintf(stderr, "[report] no frame presented for %d s (frame %u)\n", secs, now);
+                imbk_write_dump("hang", nullptr);
+            }
+        }
+    }).detach();
+}
+#endif
+
 int main(int argc, char** argv)
 {
     if (argc < 2) {
@@ -484,6 +551,7 @@ int main(int argc, char** argv)
     if (!getenv("GCM_FLIPCB_ONTICK")) _putenv_s("GCM_FLIPCB_ONTICK", "1");
     timeBeginPeriod(1);
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
+    imbk_start_reports();
 #endif
 
     printf("=== ps3recomp game runner ===\n");

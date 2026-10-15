@@ -90,6 +90,7 @@ The intended workflow is to translate by stable script ID, preserve control inst
 |---|---|
 | [`src/`](src/) | Supporting C++ archive, script and translation tools |
 | [`native/`](native/) | Native port runner, ABI bridges and CMake integration |
+| [`launcher/`](launcher/) | Windows launcher: setup from your own disc image, language choice, settings, Play |
 | [`patches/ps3recomp/`](patches/ps3recomp/) | Local runtime/lifter fixes against a pinned upstream commit |
 | [`translations/`](translations/) | English draft text and workflow |
 | [`docs/`](docs/) | Format research, progress data and technical notes |

@@ -1,0 +1,31 @@
+# English menu/dialog labels for the decrypted EBOOT.ELF (BLJM60042).
+# Located by file offset in the supported ELF; each text is written NUL-padded over <size> bytes.
+# No original text is stored. offset<TAB>size<TAB>text
+elf_sha256	735d34f943b13788a7a776226181e1ae456b0bcaf3e6e495f6f542bb3fd143db
+0x3c14a8	8	New Game
+0x3c14b8	8	Continue
+0x3c4c10	4	OK
+0x3c4d20	4	Yes
+0x3c4d28	6	No
+0x3c4c20	10	Cancel
+0x3c4be0	6	Save
+0x3c4be8	6	Load
+0x3c4bf0	8	Check
+0x3c4c00	4	OK
+0x3c4c08	4	Pick
+0x3c4c18	4	Quit
+0x3c4c30	8	Summary
+0x3c4c40	4	Day
+0x3c4c48	10	Play Time
+0x3c4c58	4	hr
+0x3c4c60	2	m
+0x3c4ca0	6	Empty
+0x3c4cc0	6	Color
+0x3c4ce0	26	No save data found.
+0x3c4d00	24	Unable to save.
+0x3c4d30	16	Save the game?
+0x3c4d48	20	Keep playing?
+0x3c4d70	14	Back to Title
+0x3c4db0	46	Choose a save slot for your new game.
+0x3c4de0	34	Checking save data...
+0x3c4e08	56	Do not turn off the power or quit the game.

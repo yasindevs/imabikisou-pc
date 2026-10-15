@@ -34,7 +34,13 @@ After generating the PPU sources, wrap the Sofdec movie entry points with host h
 python tools/apply_ppu_hooks.py /absolute/path/to/private/ppu-output
 ```
 
-`ppu_hooks.cpp` receives these calls. `movie_bridge.cpp` decodes every Sofdec movie (all MPEG-1 1280x720) on the PC with `movie_native.c` (pl_mpeg, MIT) and writes each frame into the YUV buffer that Sofdec hands to its own RGBA converter. It also skips the SPU picture decode while every playing movie is decoded natively. The SPU decode was ~4x too slow for the heavy movies, so they stuttered. Timing, loops, ADX sound and drawing stay the game's. `IMBK_MOVIE=0` restores the original path and `IMBK_MOVIE=check` only compares the two decodes.
+`ppu_hooks.cpp` receives these calls. `movie_bridge.cpp` decodes every Sofdec movie (all MPEG-1 1280x720) on the PC with `movie_native.c` (pl_mpeg, MIT) and writes each frame into the YUV buffer that Sofdec hands to its own RGBA converter. While every playing movie is decoded natively, Sofdec's SPU decoder keeps its parsing and bookkeeping but skips the pixel work (IDCT, motion compensation, macroblock output): the SPU decode was ~4x too slow for the heavy movies. Patch the generated SPU image once after each regeneration:
+
+```sh
+python tools/apply_spu_movie_skip.py /absolute/path/to/private/spu-output/spu_0004_at_00431580/spu_recomp.c
+```
+
+ Timing, loops, ADX sound and drawing stay the game's. `IMBK_MOVIE=0` restores the original path and `IMBK_MOVIE=check` only compares the two decodes.
 
 ## Configure with private generated sources
 
