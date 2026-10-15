@@ -63,12 +63,40 @@ static void render_horizontal(ppu_context* c) {
     // Floating arguments occupy FPR1/2 AND slots r6/r7. The two following
     // output pointers therefore arrive in r8/r9, not r6/r7.
     u32 surf = (u32)c->gpr[5], metrics = (u32)c->gpr[8], transfer = (u32)c->gpr[9];
+    const u32 game_surf = surf;
+    // The glyph image goes to a private guest buffer, never the title's
+    // surface: Imabikiso hands libfont the start of its own text atlas as the
+    // surface (object+0x524 aliases object+0x400) and copies the glyph from
+    // TransInfo.Image into that same atlas. Rendering into the surface wrote
+    // over glyphs already packed there -- striped letters from the second
+    // atlas row on. The private surface keeps the title's size and scissor.
+    // FONT_GAME_SURFACE=1 restores the old behaviour.
+    static int own = -1;
+    if (own < 0) own = getenv("FONT_GAME_SURFACE") ? 0 : 1;
+    if (own && transfer && surf) {
+        static u32 priv = 0, priv_bytes = 0;
+        const u32 w = vm_read32(surf+12), h = vm_read32(surf+16), px = std::max(1u, vm_read32(surf+8));
+        const u32 need = 64 + w * h * px;
+        if (w && h && w <= 4096 && h <= 4096 && px <= 4) {
+            if (need > priv_bytes) {
+                priv = vm_stack_allocate(&g_vm_stack_alloc, need);
+                priv_bytes = priv ? need : 0;
+                fprintf(stderr, "[font-abi] private glyph surface %ux%u -> 0x%08X\n", w, h, priv);
+            }
+            if (priv) {
+                for (u32 i = 0; i < 9; ++i) vm_write32(priv + i * 4, vm_read32(surf + i * 4));
+                vm_write32(priv, priv + 64);
+                vm_write32(priv + 4, w * px);
+                surf = priv;
+            }
+        }
+    }
     s32 rc = cellFontRenderCharGlyphImage(ptr<CellFont>(c->gpr[3]), (u32)c->gpr[4],
         ptr<CellFontRenderSurface>(surf), (float)c->fpr[1], (float)c->fpr[2],
         ptr<CellFontGlyphMetrics>(metrics), nullptr);
     if (rc == CELL_OK && transfer) {
         // CellFontImageTransInfo is six words, unlike the runtime's
-        // five-word GlyphImage. The image was rendered into the guest surface.
+        // five-word GlyphImage. The image was rendered into `surf`.
         auto read_float = [](u32 a) { u32 bits=vm_read32(a); float f; std::memcpy(&f,&bits,4); return f; };
         u32 pitch = vm_read32(surf+4), pixel = vm_read32(surf+8);
         int sx = (int)vm_read32(surf+12), sy = (int)vm_read32(surf+16);
@@ -86,6 +114,12 @@ static void render_horizontal(ppu_context* c) {
         vm_write32(transfer+12, height);
         vm_write32(transfer+16, pixels);
         vm_write32(transfer+20, pitch);
+        static int xl = -1, xn = 0;
+        if (xl < 0) { const char* e = getenv("FONT_XFER_LOG"); xl = e ? atoi(e) : 0; }
+        if (xn < xl) { xn++;
+            fprintf(stderr, "[font-xfer] tid=%lu U+%04X surf=0x%08X pen=(%.1f,%.1f) box=(%d,%d) %dx%d bearY=%.2f h=%.2f\n",
+                    GetCurrentThreadId(), (u32)c->gpr[4], vm_read32(game_surf), (float)c->fpr[1], (float)c->fpr[2], x0, y0, width, height,
+                    metrics ? read_float(metrics+12) : 0.f, metrics ? read_float(metrics+4) : 0.f); }
     }
     static unsigned logs;
     if (logs++ < 4) fprintf(stderr, "[font-abi] render U+%04X -> 0x%08X\n", (u32)c->gpr[4], (u32)rc);

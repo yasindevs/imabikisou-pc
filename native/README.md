@@ -73,4 +73,4 @@ Controls: **X = Circle / confirm**, **Z = Cross / back**, arrows = navigation, E
 
 `IMBK_SAMPLE` enables guest sampling; `tools/resolve_samples.py` resolves log RVAs using `build-native/MyGameRecomp.map`. Keep the map from the same executable. `AUDIO_RATE=1` reports mix cadence and backend drops. `AUDIO_WAV` writes raw stereo float32 PCM at 48 kHz, not a WAV container. Diagnostic captures can affect timing.
 
-Approximately 57–60 presentations/s were measured in sampled scenes. Audio PCM still contains interruptions, movies still stutter, and a full playthrough has not been performed. No playable-release claim is made.
+Approximately 57–60 presentations/s were measured in sampled scenes. Audio PCM still has occasional gaps, and a full playthrough has not been performed. No playable-release claim is made.

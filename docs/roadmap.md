@@ -9,14 +9,14 @@ The figures describe estimated engineering readiness within each workstream. The
 | Workstream | Estimate | Weight in overall score |
 |---|---:|---:|
 | Boot & runtime | 90% | 10% |
-| Graphics & pacing | 65% | 20% |
+| Graphics & pacing | 75% | 20% |
 | Input & save/load | 65% | 10% |
-| Audio | 35% | 15% |
-| Movies | 35% | 15% |
+| Audio | 55% | 15% |
+| Movies | 70% | 15% |
 | Full-game validation | 10% | 20% |
 | English story coverage | 33 / 19,018 = 0.17% draft | 10% |
 
-Overall = sum(estimate × weight) / sum(weights), rounded: **41%**. Translation coverage counts draft entries, not reviewed quality. The chart's remaining portion means work not yet considered ready, including untested behavior. It is not a prediction of hours remaining.
+Overall = sum(estimate × weight) / sum(weights), rounded: **51%**. Translation coverage counts draft entries, not reviewed quality. The chart's remaining portion means work not yet considered ready, including untested behavior. It is not a prediction of hours remaining.
 
 Edit `docs/progress.json`, then run `python tools/render_progress.py` to regenerate the chart (Pillow required). The README table and prose must be updated with the same evidence. Do not increase a percentage solely because FPS increased.
 

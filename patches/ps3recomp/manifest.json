@@ -8,7 +8,7 @@
     },
     {
       "path": "libs/font/cellFont.c",
-      "patched_sha256_lf": "155b7a92d6b8aca76f4be0eaa59728bb2db0f3c5caa24e2fb1909cbe6dae3ab3"
+      "patched_sha256_lf": "1f448726825f2b6090a3d297d75517d36dd105f09d29088d59d8c47b2da99a7e"
     },
     {
       "path": "libs/font/cellFont.h",
@@ -52,7 +52,7 @@
     },
     {
       "path": "libs/video/rsx_live_draw.c",
-      "patched_sha256_lf": "21116d028bff578b9375790c74ee941bc0b1d898e374438693371f7316780df8"
+      "patched_sha256_lf": "6d960822d39d4b4e60daa3963816ad5c655a91808ab255b42e38f9def2e9ec51"
     },
     {
       "path": "runtime/ppu/ppu_fs.cpp",

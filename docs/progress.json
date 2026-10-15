@@ -1,5 +1,5 @@
 {
-  "updated": "2026-10-14",
+  "updated": "2026-10-15",
   "method": "Weighted planning estimates, not measured game-wide compatibility.",
   "translation_total": 19018,
   "translation_draft": 33,
@@ -12,7 +12,7 @@
     },
     {
       "label": "Graphics & pacing",
-      "percent": 65,
+      "percent": 75,
       "weight": 20
     },
     {
@@ -22,12 +22,12 @@
     },
     {
       "label": "Audio",
-      "percent": 35,
+      "percent": 55,
       "weight": 15
     },
     {
       "label": "Movies",
-      "percent": 35,
+      "percent": 70,
       "weight": 15
     },
     {

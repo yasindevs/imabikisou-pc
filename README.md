@@ -36,25 +36,25 @@ Actual captures from the native PC prototype, showing the **English machine-tran
 | [![Prologue displaying A hallucination. It has to be.](docs/screenshots/03-prologue-hallucination.png)](docs/screenshots/03-prologue-hallucination.png) | [![School scene with the first classroom narration in English](docs/screenshots/04-classroom-english.png)](docs/screenshots/04-classroom-english.png) |
 | **“A hallucination. It has to be.”** | **First classroom narration rendered in English** |
 
-[Full-resolution gallery and captions](docs/screenshots/README.md). These stills show rendering and text only; audio interruptions and movie stutters remain.
+[Full-resolution gallery and captions](docs/screenshots/README.md). These stills show rendering and text only; occasional audio gaps remain.
 
 ## Progress
 
-![Development progress: estimated overall engineering readiness 41%; detailed breakdown below](docs/assets/progress.png)
+![Development progress: estimated overall engineering readiness 51%; detailed breakdown below](docs/assets/progress.png)
 
-**Updated: 14 October 2026.** The chart is a planning estimate based on the milestones below. It is **not** an automated compatibility score, a percentage of the story that is playable, or a release-date prediction. Full-game compatibility remains largely untested.
+**Updated: 15 October 2026.** The chart is a planning estimate based on the milestones below. It is **not** an automated compatibility score, a percentage of the story that is playable, or a release-date prediction. Full-game compatibility remains largely untested.
 
 | Workstream | Estimate | Current evidence | Still to do |
 |---|---:|---|---|
 | Boot & runtime | 90% | Startup, system callbacks, fonts and initial loading run | Regression tests and less common system paths |
-| Graphics & pacing | 70% | Opening and classroom render at ~60 presentations/s; NV0039 buffer copies implemented (fixes the purple/green panorama scenes) | Wider effects coverage, glyph cache edge artefacts, scene regressions |
+| Graphics & pacing | 75% | Opening and classroom render at ~60 presentations/s; NV0039 buffer copies implemented (fixes the purple/green panorama scenes); glyphs no longer drawn into the game's text atlas (fixes striped/ghost letters) | Wider effects coverage, scene regressions |
 | Input & save/load | 65% | Keyboard/controller confirmation and early save/load exercised | Longer sessions, all menus and save-slot edge cases |
 | Audio | 55% | Mixer consumes guest blocks on a steady 5.33 ms clock (half-written blocks gone); SPU busy-waits removed | Occasional voice starvation, longer-session checks |
 | Movies | 70% | All movies (MPEG-1 1280x720) decoded natively on the PC and handed to Sofdec; logo jingle in sync, decode tasks ~0.3 ms instead of ~50 ms | Alpha/effect movies and seamless loops across many scenes still to be checked |
 | Full-game validation | 10% | Opening and first classroom tested | Branches, routes, endings, long-session stability |
 | English story coverage | 0.17% draft | 33 of 19,018 exported script entries; 27 UI labels separately | Machine translation, layout checks, context and terminology review |
 
-Overall **41%** is a weighted planning score, rounded to a whole number. It deliberately gives substantial weight to audio, movies and full-game testing. [Weights and definitions](docs/roadmap.md#how-the-percentages-work) · [Source data](docs/progress.json).
+Overall **51%** is a weighted planning score, rounded to a whole number. It deliberately gives substantial weight to audio, movies and full-game testing. [Weights and definitions](docs/roadmap.md#how-the-percentages-work) · [Source data](docs/progress.json).
 
 ## What works today
 
@@ -68,7 +68,7 @@ Overall **41%** is a weighted planning score, rounded to a whole number. It deli
 
 ## Known problems
 
-**Audio crackling and movie stutters are still present.** A near-60 presentation rate does not mean every movie frame is decoded on time. Interruptions also appear in the recorded PCM before device output, so a larger speaker buffer alone does not resolve them.
+**Occasional audio gaps remain.** Crackling is largely gone since the mixer was paced, but a voice stream can still briefly starve. Movies are decoded natively and played smoothly in the scenes tested; alpha/effect movies elsewhere are unchecked. One freeze was seen once when the opening movie started from the title screen (an SPU decode task was halted); it did not reproduce in later runs.
 
 The rest of the game has not been validated. Later effects, menus, choices, routes and long sessions may expose rendering errors, freezes or crashes. Some UI text is stored in images and remains Japanese. There is no release date yet.
 
