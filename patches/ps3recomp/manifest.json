@@ -8,7 +8,7 @@
     },
     {
       "path": "libs/font/cellFont.c",
-      "patched_sha256_lf": "1f448726825f2b6090a3d297d75517d36dd105f09d29088d59d8c47b2da99a7e"
+      "patched_sha256_lf": "81ff95ab5b30c49bf5d836563ea84a78dd8a56675deac32ae42774ff916acef0"
     },
     {
       "path": "libs/font/cellFont.h",
@@ -84,7 +84,7 @@
     },
     {
       "path": "runtime/spu/spu_dma.h",
-      "patched_sha256_lf": "175c8f88d26859a556252a506bb3edfb7beea2cbf970acfe29d90989335dd7cd"
+      "patched_sha256_lf": "313c6f1d93e5bebee722905aed0dff3315857f6d5491492733ad8450b5fb22c5"
     },
     {
       "path": "runtime/spu/spu_helpers.h",

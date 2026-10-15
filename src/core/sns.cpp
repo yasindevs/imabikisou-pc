@@ -236,6 +236,7 @@ std::vector<Line> Script::lines() const {
         bool inBlock = false;
         Line cur;
         bool hasText = false;
+        Line::Break brk = Line::Break::Page; // since the previous text instruction
 
         auto flush = [&](std::size_t lastIndex) {
             if (hasText) {
@@ -265,13 +266,21 @@ std::vector<Line> Script::lines() const {
             switch (in.opcode) {
             case op::Text:
                 cur.text.append(reinterpret_cast<const char*>(a.data()), a.size());
+                if (!hasText) cur.brk = brk;
+                brk = Line::Break::Continue;
                 hasText = true;
                 break;
             case op::RubyBegin: cur.text += "<ruby:"; break;
             case op::RubyEnd: cur.text += ">"; break;
-            case op::Newline: cur.text += "\n"; break;
-            case op::Wait:
-            case op::Page: flush(i); break;
+            case op::Newline:
+                cur.text += "\n";
+                if (brk == Line::Break::Continue) brk = Line::Break::Line;
+                break;
+            case op::Wait: flush(i); break;
+            case op::Page:
+                flush(i);
+                brk = Line::Break::Page;
+                break;
             case op::MessageBegin:
                 flush(i);
                 message = messageId(in);

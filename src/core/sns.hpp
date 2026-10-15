@@ -81,6 +81,10 @@ struct Line {
     std::size_t file = 0;
     std::size_t first = 0, last = 0; // instruction index range in File::code, `last` excluded
     std::string text; // UTF-8; "\n" for Newline, <ruby:reading>, <name:XX>, <XX:hex> for other inline codes
+    // Where the line's first text appears on screen, from the newline/page
+    // instructions met since the previous text in file order (inside or
+    // outside any line): Continue = right after the previous text.
+    enum class Break : std::uint8_t { Continue, Line, Page } brk = Break::Page;
 };
 
 class Script {

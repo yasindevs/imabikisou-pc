@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -30,6 +31,8 @@
 
 extern "C" uint8_t* vm_base;
 extern "C" void (*g_ps3_fs_read_hook)(int fd, const char* guest_path, long long pos, unsigned long long n);
+
+static void update_native_active();
 
 namespace {
 
@@ -129,6 +132,7 @@ void fs_read_hook(int, const char* guest, long long pos, unsigned long long)
             fprintf(stderr, "[movie] AFS partition %u = %s\n", p.pid, path.c_str());
             open_movie(p.hn, path, p.fid);
             g_pending.erase(g_pending.begin() + (long)i);
+            update_native_active();
             return;
         }
     }
@@ -150,18 +154,18 @@ double psnr(const uint8_t* a, const uint8_t* b, size_t n)
  * work (~50 ms per half picture on the heavy movies) and the reason Sofdec
  * fell behind, so the call returns at once. IMBK_MOVIE_SKIP_SPU=0 keeps it. */
 extern "C" int (*g_spu_ib_skip)(void* ctx, uint32_t target, uint32_t link);
-static int g_native_active = 0;     /* every started handle is native (under g_mu) */
+static std::atomic<int> g_native_active{0}; /* every started handle is native (written under g_mu) */
 static int ib_skip(void* ctx, uint32_t target, uint32_t link)
 {
     (void)ctx;
-    return target == 0x20458u && link == 0xB28u && g_native_active;
+    return target == 0x20458u && link == 0xB28u && g_native_active.load(std::memory_order_acquire);
 }
 
 static void update_native_active()
 {
     bool all = !g_movies.empty() && g_pending.empty();
     for (auto& kv : g_movies) if (!kv.second.mv) all = false;
-    g_native_active = all && mode() == 1;
+    g_native_active.store(all && mode() == 1, std::memory_order_release);
 }
 
 extern "C" void imbk_movie_install(void)

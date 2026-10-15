@@ -47,6 +47,7 @@ Usage:
 Main script (residentchunk.afs/st.sns):
   imbk sns info    <game>                    Files, labels, resources and line counts
   imbk sns text    <game> [out.tsv]          Export lines as "<id>\t<text>"
+  imbk sns layout  <game> [out.tsv]          Where each line starts: "<id>\tpage|line|cont" (for wrapping)
   imbk sns disasm  <game> [out.txt]          Disassemble all script files
   imbk sns decrypt <game> <out-file>         Write the decrypted container
 
@@ -284,6 +285,17 @@ int cmdSnsText(const Game& game, const char* outPath) {
     return 0;
 }
 
+// Layout facts for word wrapping: where each line starts on screen.
+int cmdSnsLayout(const Game& game, const char* outPath) {
+    const auto s = loadMainScript(game);
+    Output o(outPath);
+    for (const auto& line : s.lines()) {
+        const char* b = line.brk == sns::Line::Break::Page ? "page" : line.brk == sns::Line::Break::Line ? "line" : "cont";
+        o.out() << line.id << '\t' << b << '\n';
+    }
+    return 0;
+}
+
 int cmdSnsDisasm(const Game& game, const char* outPath) {
     const auto s = loadMainScript(game);
     Output o(outPath);
@@ -418,6 +430,7 @@ int run(int argc, char** argv) {
         if (cmd == "sn4" && sub == "text") return cmdText(gameArg(3), out);
         if (cmd == "sns" && sub == "info") return cmdSnsInfo(gameArg(3));
         if (cmd == "sns" && sub == "text") return cmdSnsText(gameArg(3), out);
+        if (cmd == "sns" && sub == "layout") return cmdSnsLayout(gameArg(3), out);
         if (cmd == "sns" && sub == "disasm") return cmdSnsDisasm(gameArg(3), out);
         if (cmd == "sns" && sub == "decrypt" && out) return cmdSnsDecrypt(gameArg(3), fs::path(out));
     }

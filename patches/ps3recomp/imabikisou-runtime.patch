@@ -366,7 +366,30 @@
          return CELL_OK;
      }
  #endif
-@@ -565,7 +592,33 @@ s32 cellFontRenderCharGlyphImage(CellFont* font, u32 code,
+@@ -547,6 +574,22 @@ s32 cellFontRenderCharGlyphImage(CellFont* font, u32 code,
+     CellFontGlyphMetrics hm;
+     font_metrics_host(font, code, &hm);
+     if (metrics) font_metrics_store(metrics, &hm);
++    /* FONT_ADV_DUMP=1: once per (font slot, pixel scale) that renders, the
++     * printable-ASCII advances -- the table an English line-wrap tool needs. */
++    { static int on = -1; static float done[64]; static int nd = 0;
++      if (on < 0) on = getenv("FONT_ADV_DUMP") ? 1 : 0;
++      const float key = (float)(slot - s_fonts) * 1000.0f + slot->scale_y;
++      int seen = 0;
++      for (int i = 0; i < nd; i++) if (done[i] == key) seen = 1;
++      if (on && !seen && nd < 64) {
++          done[nd++] = key;
++          fprintf(stderr, "[font-adv] slot=%d scale=%.2f", (int)(slot - s_fonts), slot->scale_y);
++          for (u32 ch = 0x20; ch < 0x7F; ch++) {
++              CellFontGlyphMetrics a; font_metrics_host(font, ch, &a);
++              fprintf(stderr, " %02X:%.4f", ch, a.h_advance);
++          }
++          fprintf(stderr, "\n");
++      } }
+ 
+     CellFontRenderSurface hs;
+     font_surface_load(&hs, surface);
+@@ -565,7 +608,33 @@ s32 cellFontRenderCharGlyphImage(CellFont* font, u32 code,
          /* Blit glyph bitmap to surface */
          int dx = (int)(x + hm.h_bearing_x);
          int dy = (int)(y - hm.h_bearing_y);
@@ -401,7 +424,7 @@
          for (int row = 0; row < bh; row++) {
              int sy = dy + row;
              if (sy < 0 || sy >= hs.height) continue;
-@@ -573,11 +626,11 @@ s32 cellFontRenderCharGlyphImage(CellFont* font, u32 code,
+@@ -573,11 +642,11 @@ s32 cellFontRenderCharGlyphImage(CellFont* font, u32 code,
                  int sx = dx + col;
                  if (sx < 0 || sx >= hs.width) continue;
                  u8 alpha = bitmap[row * bw + col];
@@ -1752,6 +1775,21 @@
        if (s_hi && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo) {
            static int _n = 0;
            if (_n++ < 64)
+@@ -1176,7 +1209,13 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+      * pages on demand the counter never advanced and a spinning job simply hung
+      * the chain walker instead. Count repeats whether or not the transfer
+      * succeeds, and halt at a known pc rather than hanging silently. */
+-    { static uint32_t s_last_ea, s_last_lsa, s_rep;
++    /* Not for list commands: their EAL is the LS address of a list the SPU
++     * rewrites between submissions (Sofdec's picture decode re-sends the
++     * same PUTL list at LS 0x2F000 with new elements), so an identical
++     * (ea, lsa) pair is no sign of a wedge -- halting it froze the opening
++     * movie. Counters are per thread: two SPUs alternating used to share them. */
++    if (!mfc_is_list(cmd))
++    { static _Thread_local uint32_t s_last_ea, s_last_lsa, s_rep;
+       static uint32_t s_limit = 0;
+       if (!s_limit) { const char* e = getenv("SPU_DMA_REPEAT_LIMIT");
+                       s_limit = e ? (uint32_t)strtoul(e, 0, 0) : 256u; }
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -186,18 +186,23 @@ static inline u128 spu_selb(u128 a, u128 b, u128 c) {
