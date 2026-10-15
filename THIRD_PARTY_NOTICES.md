@@ -4,6 +4,13 @@ The native runner and build scaffold derive from ps3recomp templates; the runtim
 
 Upstream: https://github.com/sp00nznet/ps3recomp
 
+## pl_mpeg
+
+`native/third_party/pl_mpeg/pl_mpeg.h` -- MPEG-1 video decoder by Dominic Szablewski (phoboslab),
+https://github.com/phoboslab/pl_mpeg, MIT license (see the header of that file).
+
+## ps3recomp license
+
 MIT License
 
 Copyright (c) 2026 Ned Heller / sp00nznet

@@ -8,7 +8,7 @@
     },
     {
       "path": "libs/font/cellFont.c",
-      "patched_sha256_lf": "36f10200f963639c6fc749ad0787a5881b0877d95f18297d58b0e8aaca93fbf1"
+      "patched_sha256_lf": "155b7a92d6b8aca76f4be0eaa59728bb2db0f3c5caa24e2fb1909cbe6dae3ab3"
     },
     {
       "path": "libs/font/cellFont.h",
@@ -40,7 +40,7 @@
     },
     {
       "path": "libs/video/cellGcmSys.c",
-      "patched_sha256_lf": "328ce51a58e5c14ae9b0192ed879b5ca809813750e4b83ba5b5b12da0941e1b1"
+      "patched_sha256_lf": "cc954615fd3118f24066d3d2c7952e1e9f2601e29f5f8635042242c2d77f701f"
     },
     {
       "path": "libs/video/cellResc.c",
@@ -52,11 +52,11 @@
     },
     {
       "path": "libs/video/rsx_live_draw.c",
-      "patched_sha256_lf": "1323a718707ddb4138fa4196356f11e8cebd9c27ea891cb863fc54e0eb37b849"
+      "patched_sha256_lf": "21116d028bff578b9375790c74ee941bc0b1d898e374438693371f7316780df8"
     },
     {
       "path": "runtime/ppu/ppu_fs.cpp",
-      "patched_sha256_lf": "6fcbe3cfba44dec5797784098a3d49e922c48a94ac1ea9a89f12bde4f4fbe8d0"
+      "patched_sha256_lf": "022e8102be37357b276d5a9b57bca2ec6b1a15def6c39f287e1c2311480912bf"
     },
     {
       "path": "runtime/ppu/ppu_hle.cpp",
@@ -72,7 +72,7 @@
     },
     {
       "path": "runtime/spu/spu_channels.c",
-      "patched_sha256_lf": "d8efed2ab8b32dbaec04a11a83bf36a7f07e2cb15c3af34ba459c2a5ffc8c866"
+      "patched_sha256_lf": "a278c64db0feedc62e9891f2d4b512acf4f2a09a26cb5977460228c02c969b5f"
     },
     {
       "path": "runtime/spu/spu_coherency.c",
@@ -81,6 +81,10 @@
     {
       "path": "runtime/spu/spu_context.h",
       "patched_sha256_lf": "201f77730a3c52586bc0051d9d18ef2d4c15021bef71d3a8097685eaee9c552e"
+    },
+    {
+      "path": "runtime/spu/spu_dma.h",
+      "patched_sha256_lf": "175c8f88d26859a556252a506bb3edfb7beea2cbf970acfe29d90989335dd7cd"
     },
     {
       "path": "runtime/spu/spu_helpers.h",

@@ -26,6 +26,16 @@ The patch contains the accumulated runtime and lifter work used by the prototype
 
 Use the pinned SDK's `docs/GETTING_STARTED.md` and its PPU/SPU tool help to generate private outputs after applying the patch. The PPU stack-mediated switch correction and SPU receive-event continuation require the corrected lifters. A complete clean-clone regeneration has **not yet been validated**; this repository does not promise a one-command conversion.
 
+## Hook the generated PPU code
+
+After generating the PPU sources, wrap the Sofdec movie entry points with host hooks (idempotent; rerun after every regeneration):
+
+```sh
+python tools/apply_ppu_hooks.py /absolute/path/to/private/ppu-output
+```
+
+`ppu_hooks.cpp` receives these calls. `movie_bridge.cpp` decodes every Sofdec movie (all MPEG-1 1280x720) on the PC with `movie_native.c` (pl_mpeg, MIT) and writes each frame into the YUV buffer that Sofdec hands to its own RGBA converter. It also skips the SPU picture decode while every playing movie is decoded natively. The SPU decode was ~4x too slow for the heavy movies, so they stuttered. Timing, loops, ADX sound and drawing stay the game's. `IMBK_MOVIE=0` restores the original path and `IMBK_MOVIE=check` only compares the two decodes.
+
 ## Configure with private generated sources
 
 From a Visual Studio developer shell, substitute your actual paths:

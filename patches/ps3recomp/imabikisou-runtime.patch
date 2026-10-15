@@ -356,7 +356,42 @@
          return CELL_OK;
      }
  #endif
-@@ -573,11 +597,11 @@
+@@ -565,7 +589,33 @@
+         /* Blit glyph bitmap to surface */
+         int dx = (int)(x + hm.h_bearing_x);
+         int dy = (int)(y - hm.h_bearing_y);
+-
++        { static int dbg = -1, n = 0;
++          if (dbg < 0) { const char* e = getenv("FONT_SURF_LOG"); dbg = e ? atoi(e) : 0; }
++          if (dbg && n++ < dbg)
++              fprintf(stderr, "[font-surf] code=U+%04X surf %dx%d pitch=%d px=%d at (%.1f,%.1f) glyph %dx%d at (%d,%d) scale=%.1f\n",
++                      code, hs.width, hs.height, hs.widthByte, hs.pixelSizeByte, x, y, bw, bh, dx, dy, slot->scale_y); }
++
++        /* Clear a whole character cell around the pen first. Titles render
++         * every glyph into one scratch surface at the same pen position and
++         * copy a cell around it into their glyph cache (Imabikisou: 512x512,
++         * pen at 234,272, 44 px font); writing only the new bitmap's box left
++         * the strokes of a larger previous glyph around a smaller one, which
++         * then showed as fragments over letters ('.', 'l', 'u'...).
++         * FONT_NO_CELL_CLEAR=1 restores the old behaviour. */
++        { static int keep = -1;
++          if (keep < 0) keep = getenv("FONT_NO_CELL_CLEAR") ? 1 : 0;
++          if (!keep && hs.pixelSizeByte > 0) {
++              const float em = slot->scale_y > 0 ? slot->scale_y : 32.0f;
++              int x0 = (int)(x - em * 0.5f), x1 = (int)(x + em * 2.0f);
++              int y0 = (int)(y - em * 1.5f), y1 = (int)(y + em * 0.75f);
++              if (x0 < 0) x0 = 0;
++              if (y0 < 0) y0 = 0;
++              if (x1 > hs.width) x1 = hs.width;
++              if (y1 > hs.height) y1 = hs.height;
++              for (int sy = y0; sy < y1; sy++)
++                  if (x1 > x0) memset(hs.buffer + sy * hs.widthByte + x0 * hs.pixelSizeByte, 0,
++                                      (size_t)(x1 - x0) * hs.pixelSizeByte);
++          } }
+         for (int row = 0; row < bh; row++) {
+             int sy = dy + row;
+             if (sy < 0 || sy >= hs.height) continue;
+@@ -573,11 +623,11 @@
                  int sx = dx + col;
                  if (sx < 0 || sx >= hs.width) continue;
                  u8 alpha = bitmap[row * bw + col];
@@ -778,7 +813,65 @@
      { static int _n = 0; static int cap = -1;
        if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
        if (cap && _n < cap) { _n++;
-@@ -2315,7 +2368,7 @@
+@@ -1807,6 +1860,57 @@
+                 s_fifo_getoff += 4 + count * 4;
+                 continue;
+             }
++            /* NV0039 (memory-to-memory buffer copy) on subchannel 1, the
++             * libgcm default binding -- cellGcmSetTransferData. Its blocks are
++             * unmistakable: SET_CONTEXT_DMA_BUFFER_IN/OUT as one 2-word block
++             * at 0x184, then OFFSET_IN, OFFSET_OUT, PITCH_IN, PITCH_OUT,
++             * LINE_LENGTH_IN, LINE_COUNT, FORMAT, BUFFER_NOTIFY as one 8-word
++             * block at 0x30C (the notify is the trigger). They used to be fed to
++             * the 3D state machine, which ignored them, so the copy never
++             * happened: Imabikisou uploads every texture whose rows are not
++             * 64-byte multiples this way (its 1968-wide panoramas), and the
++             * scene then sampled whatever the VRAM held before -- purple/green
++             * DXT garbage. Other subchannel-1 traffic still goes to 3D below.
++             * GCM_NV0039=0 disables. */
++            { static int en39 = -1;
++              if (en39 < 0) { const char* e = getenv("GCM_NV0039"); en39 = e ? atoi(e) : 1; }
++              if (en39 && subch == 1 && type == 0 &&
++                  ((method == 0x184u && count == 2) || (method == 0x30Cu && count == 8))) {
++                  static u32 dma_in = 0xFEED0000u, dma_out = 0xFEED0000u;
++                  u32 v[8] = {0};
++                  int ok = 1;
++                  for (u32 i = 0; i < count; i++) {
++                      const u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
++                      if (!dea) { ok = 0; break; }
++                      v[i] = vm_read32(dea);
++                  }
++                  if (!ok) break;
++                  if (method == 0x184u) { dma_in = v[0]; dma_out = v[1]; }
++                  else {
++                      const u32 src = cellGcmResolveLocated(dma_in  != 0xFEED0001u, v[0]);
++                      const u32 dst = cellGcmResolveLocated(dma_out != 0xFEED0001u, v[1]);
++                      const int32_t pin = (int32_t)v[2], pout = (int32_t)v[3];
++                      const u32 len = v[4], lines = v[5];
++                      extern uint8_t* vm_base;
++                      extern int  spu_coh_is_reserved(uint32_t ea);
++                      extern void spu_coh_notify_write(uint32_t ea);
++                      if (src && dst && len && lines && len <= 0x100000u && lines <= 0x10000u) {
++                          for (u32 y = 0; y < lines; y++) {
++                              const u32 s = src + (u32)((int64_t)pin * y), d = dst + (u32)((int64_t)pout * y);
++                              memmove(vm_base + d, vm_base + s, len);
++                              for (u32 a = d & ~127u; a < d + len; a += 128)
++                                  if (spu_coh_is_reserved(a)) spu_coh_notify_write(a);
++                          }
++                      }
++                      { static int dbg = -1, n = 0;
++                        if (dbg < 0) { const char* e = getenv("GCM_NV0039_DBG"); dbg = e ? atoi(e) : 0; }
++                        if (dbg && n++ < dbg)
++                            fprintf(stderr, "[NV0039] 0x%08X(p%d) -> 0x%08X(p%d) %u x %u fmt=0x%X\n",
++                                    src, pin, dst, pout, len, lines, v[6]); }
++                  }
++                  s_fifo_getoff += 4 + count * 4;
++                  continue;
++              } }
+             for (u32 i = 0; i < count; i++) {
+                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+                 if (!dea) break;
+@@ -2315,7 +2419,7 @@
      /* Flip requested but not yet shown: a subsequent cellGcmSetWaitFlip blocks
       * until the present thread's cellGcmTickFlip marks it done (vsync). */
      s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
@@ -787,7 +880,7 @@
  
      /* Invoke via OPD resolution, not a raw call into guest code.
       *
-@@ -2408,7 +2461,7 @@
+@@ -2408,7 +2512,7 @@
      gcm_set_current_display_buffer(bufferId);
      s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
      s_flip_request_count++;
@@ -917,7 +1010,100 @@
  int rsx_live_draw_enabled(void)
  {
      static int cached = -1;
-@@ -8322,7 +8334,7 @@
+@@ -2086,8 +2098,16 @@
+      * Counting non-zero SOURCE bytes covers every format and separates "the
+      * upload never happened" from "decode ate it". */
+     { static int ts = -1; static int tsn = 0;
+-      if (ts < 0) ts = getenv("LD_TEXSRC_DBG") ? 1 : 0;
+-      if (ts && tsn < 16) {
++      /* LD_TEXSRC_DBG=<n>: n distinct (format, size, remap) combinations
++       * instead of the first 16 uploads -- a late scene's odd format is
++       * otherwise never reached. */
++      if (ts < 0) { const char* e = getenv("LD_TEXSRC_DBG"); ts = e ? (atoi(e) > 1 ? atoi(e) : 16) : 0; }
++      int ts_new = 1;
++      if (ts) { static u32 seen[512]; static int ns;
++          const u32 key = (t->format & 0xFFu) << 24 ^ (u32)t->width << 12 ^ (u32)t->height ^ t->remap * 2654435761u;
++          for (int q = 0; q < ns; q++) if (seen[q] == key) { ts_new = 0; break; }
++          if (ts_new && ns < 512) seen[ns++] = key; }
++      if (ts && ts_new && tsn < ts) {
+           u32 nz = 0;
+           for (u32 q = 0; q < span; q++) if (src[q]) nz++;
+           char head[80]; int hn = 0;
+@@ -2329,7 +2349,10 @@
+           /* No size floor: the floor was picked for one title's full-screen
+            * textures and silently skipped every UI atlas, which is the size
+            * a 2D layer is made of. The dump is opt-in; dump what was asked. */
+-          if (td_this && m == 0 && tdn < 12 && mw && mh) {
++          { static int tw = -1, tcap = 12; if (tw < 0) { const char* e = getenv("LD_TEXRGBA_W"); tw = e ? atoi(e) : 0;
++              const char* c = getenv("LD_TEXRGBA_N"); if (c) tcap = atoi(c); }
++          /* LD_TEXRGBA_W=<width>: only textures that wide; LD_TEXRGBA_N=<n>: cap. */
++          if (td_this && m == 0 && tdn < tcap && mw && mh && (!tw || (int)mw == tw)) {
+               u64 nb = 0, na = 0;
+               for (u32 q = 0; q < mw * mh; q++) {
+                   const u8* px = rgba[n] + (size_t)q * 4;
+@@ -2337,8 +2360,8 @@
+                   if (px[3] > 0x1A) na++;
+               }
+               char fn[160];
+-              snprintf(fn, sizeof fn, "scratch/tex_%02d_%ux%u_f%02X.ppm",
+-                       tdn, mw, mh, base_fmt);
++              snprintf(fn, sizeof fn, "scratch/tex_%03d_%ux%u_f%02X_%08X_g%u.ppm",
++                       tdn, mw, mh, base_fmt, t->offset, g_ld_frames);
+               FILE* tf = fopen(fn, "wb");
+               if (tf) {
+                   fprintf(tf, "P6\n%u %u\n255\n", mw, mh);
+@@ -2351,7 +2374,7 @@
+                       fn, base_fmt, remap, linear, pitch,
+                       (unsigned long long)nb, mw * mh, (unsigned long long)na);
+               tdn++;
+-          } }
++          } } }
+         levels[n].w = mw;
+         levels[n].h = mh;
+         levels[n].data = rgba[n];
+@@ -5989,11 +6012,13 @@
+     /* LD_DRAW_DUMP=<dir> [LD_DRAW_DUMP_EVERY=k, default 10]: in the first
+      * gated frame, read back each k-th draw's target BEFORE it is recorded,
+      * named by frame-relative index -- bisects which draw changes a surface. */
+-    { static const char* dir = (const char*)-1; static u32 every, frame = ~0u, idx, dumped_frame = ~0u;
++    { static const char* dir = (const char*)-1; static u32 every, frame = ~0u, idx, dumped_frame = ~0u, s_dd_from;
+       if (dir == (const char*)-1) { dir = getenv("LD_DRAW_DUMP");
+-          const char* e = getenv("LD_DRAW_DUMP_EVERY"); every = e ? (u32)atoi(e) : 10; if (!every) every = 10; }
++          const char* e = getenv("LD_DRAW_DUMP_EVERY"); every = e ? (u32)atoi(e) : 10; if (!every) every = 10;
++          /* LD_DRAW_DUMP_FROM=<frame>: the first gated frame is this one, not frame 0. */
++          const char* f0 = getenv("LD_DRAW_DUMP_FROM"); s_dd_from = f0 ? (u32)atoi(f0) : 0; }
+       if (frame != g_ld_frames) { frame = g_ld_frames; idx = 0; }
+-      if (dir && target < g.n_surfaces && (dumped_frame == ~0u || dumped_frame == frame) &&
++      if (dir && target < g.n_surfaces && frame >= s_dd_from && (dumped_frame == ~0u || dumped_frame == frame) &&
+           (idx % every) == 0) {
+           dumped_frame = frame;
+           char path[MAX_PATH * 2];
+@@ -6892,6 +6917,24 @@
+                   fprintf(stderr, "\n");
+               }
+           }
++      } }
++    /* LD_DRAW_LOG=<from>[,<to>]: every draw of frames from..to (default one
++     * frame) with its target surface and each enabled texture unit -- which
++     * texture a wrongly coloured layer actually samples. */
++    { static int dl = -1; static u32 dl_from, dl_to;
++      if (dl < 0) { const char* e = getenv("LD_DRAW_LOG"); dl = e ? 1 : 0;
++                    if (e) { char* q2; dl_from = (u32)strtoul(e, &q2, 0); dl_to = dl_from;
++                             if (*q2 == ',') dl_to = (u32)strtoul(q2 + 1, 0, 0); } }
++      if (dl && g_ld_frames >= dl_from && g_ld_frames <= dl_to) {
++          fprintf(stderr, "[draw-log] f=%u surf=0x%08X", g_ld_frames,
++                  current_surface() < g.n_surfaces ? g.surfaces[current_surface()].offset : 0);
++          for (u32 q = 0; q < SRV_TABLE_SIZE; q++) {
++              rsx_dsp_texture tq; rsx_dsp_get_texture(&g.rsx, q, &tq);
++              if (!tq.enabled) continue;
++              fprintf(stderr, " u%u[%u:0x%08X fmt=0x%02X %ux%u p=%u remap=0x%X]",
++                      q, tq.location, tq.offset, tq.format, tq.width, tq.height, tq.pitch, tq.remap);
++          }
++          fprintf(stderr, "\n");
+       } }
+     for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
+         rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
+@@ -8322,7 +8365,7 @@
  
      ld_flush(LD_FLUSH_MOVIE_PRESENT);
      {
@@ -926,7 +1112,7 @@
          if (SUCCEEDED(present_hr))
              ld_present_measure_record(g_ld_frames);
          else {
-@@ -8866,7 +8878,7 @@
+@@ -8866,7 +8909,7 @@
  
      ld_flush(LD_FLUSH_PRESENT);
      {
@@ -937,22 +1123,35 @@
          else {
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -45,6 +45,7 @@
+@@ -45,6 +45,8 @@
  extern "C" void     vm_write32(uint64_t a, uint32_t v);
  extern "C" void     vm_write64(uint64_t a, uint64_t v);
  #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
 +extern "C" uint64_t ps3_system_time_us(void);   /* guest clock, for the read log */
++extern "C" { void (*g_ps3_fs_read_hook)(int fd, const char* guest_path, long long pos, unsigned long long n) = 0; }
  
  /* Host root that the PS3 mount points map into (dir containing PS3_GAME). */
  extern "C" const char* ppu_vfs_root = ".";
-@@ -421,8 +422,8 @@
+@@ -406,6 +408,11 @@
+       if (wfd >= 0 && fd == wfd)
+           fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
+                   fd, (unsigned long long)nbytes, n, fpos_before); }
++    /* Title hook: every completed read with the guest path and file position,
++     * for a port that needs to know which archive entry a library is
++     * streaming (Imabikisou's native movie decoder). */
++    if (g_ps3_fs_read_hook && fd >= 0 && fd < FS_MAX)
++        g_ps3_fs_read_hook(fd, g_fd_path[fd], (long long)fpos_before, (unsigned long long)n);
+     if (getenv("PS3_FSLOG")) { static int _fd=0; if(_fd++<20) fprintf(stderr,"[FSDBG] fd=%d raw_nbytes=0x%llX clamped=0x%llX buf=0x%08X fpos_before=%ld n=%zu eof=%d err=%d\n", fd,(unsigned long long)raw_nbytes,(unsigned long long)nbytes,buf,fpos_before,n,feof(g_files[fd]),ferror(g_files[fd])); }
+ #ifdef _WIN32
+     if (getenv("PS3_FSLOG") && buf==0 && raw_nbytes>0x10000) { static int _b=0; if(_b++<2){ void* fr[30]; unsigned short nn=RtlCaptureStackBackTrace(0,30,fr,0); uintptr_t mb=(uintptr_t)GetModuleHandleA(0); fprintf(stderr,"[FSBT] null-buf read caller rvas:"); for(unsigned short i=0;i<nn&&i<16;i++) fprintf(stderr," %llX",(unsigned long long)((uintptr_t)fr[i]-mb)); fprintf(stderr,"\n"); } }
+@@ -421,8 +428,8 @@
        if (fd>=0 && fd<64) { per_fd[fd]+=n; cnt_fd[fd]++; }
        int first_for_fd = (fd>=0 && fd<64 && cnt_fd[fd]==1);
        if(_n++<50 || first_for_fd || getenv("FS_READ_ALL"))
 -        fprintf(stderr,"[fs] read fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
 -                fd,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
-+        fprintf(stderr,"[fs] read t=%llums fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
-+                (unsigned long long)(ps3_system_time_us()/1000),fd,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
++        fprintf(stderr,"[fs] read t=%llums fd=%d buf=0x%08X nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
++                (unsigned long long)(ps3_system_time_us()/1000),fd,buf,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
                  (unsigned long long)tot, first_for_fd?"  <= FIRST READ ON THIS FD":"");
        if (getenv("FS_READ_PATH") && fd>=0 && fd<64 && g_fd_path[fd][0])
            fprintf(stderr, "        from %s\n", g_fd_path[fd]);
@@ -1158,7 +1357,7 @@
  #endif
  #include <time.h>
  #include "../platform/win32_compat.h"
-@@ -53,6 +54,88 @@
+@@ -53,6 +54,91 @@
      clock_gettime(CLOCK_MONOTONIC, &ts);
      return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
  #endif
@@ -1176,6 +1375,9 @@
 + * any commit it makes puts it straight back to full speed. */
 +static SPU_THREAD_LOCAL unsigned t_llar_idle;
 +static SPU_THREAD_LOCAL unsigned t_inmbox_idle;   /* see spu_inmbox_idle */
++static SPU_THREAD_LOCAL int t_task_dma_left;      /* SPU_TASK_DMA */
++/* Port hook: nonzero = skip this indirect call (see spu_indirect_branch). */
++int (*g_spu_ib_skip)(spu_context* ctx, uint32_t target, uint32_t link) = 0;
 +static void spu_llar_backoff(uint32_t ea, const void* mem)
 +{
 +    static int s_on = -1;
@@ -1247,7 +1449,7 @@
  }
  
  /* ---------------------------------------------------------------------------
-@@ -173,6 +256,10 @@
+@@ -173,6 +259,10 @@
      fflush(stderr);
  }
  
@@ -1258,7 +1460,7 @@
  /* SPU `stop` / stop-and-signal. A real SPU stop HALTS the core; the previous
   * lifted emission only did `status=...; return;`, which unwound ONE frame and
   * let the caller's service loop keep running -- so a SPURS policy doing
-@@ -193,6 +280,9 @@
+@@ -193,6 +283,9 @@
      static int s_halt = -1;
      if (s_halt < 0) s_halt = getenv("YDKJ_STOP_HALT") ? 1 : 0;
      ctx->status = SPU_STATUS_STOPPED_BY_STOP;
@@ -1268,7 +1470,7 @@
      if (s_halt) spu_halt(ctx);
  }
  
-@@ -532,6 +622,7 @@
+@@ -532,6 +625,7 @@
        } }
      switch (cmd) {
      case MFC_GETLLAR_CMD:
@@ -1276,7 +1478,7 @@
          /* Lockstep tick: a guest GETLLAR..PUTLLC poll loop is intra-function
           * (all gotos), so it never crosses the SPU_DRAIN tick site -- without a
           * tick here a polling SPU would hold the run token forever while the
-@@ -692,6 +783,7 @@
+@@ -692,6 +786,7 @@
                                  n, ctx->image_id, (void*)ctx, ea,
                                  w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); } } }
              spu_coh_notify_write(ea);
@@ -1284,15 +1486,38 @@
              ctx->atomic_stat = 0;                      /* PUTLLC_SUCCESS */
          } else {
              ctx->atomic_stat = 1;                      /* PUTLLC_FAILURE -> retry */
-@@ -793,6 +885,7 @@
+@@ -793,6 +888,30 @@
   * ===========================================================================*/
  void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
  {
 +    t_inmbox_idle = 0;   /* channel traffic: the SPU is working, not idling */
++    /* SPU_TASK_DMA=<n>: the first n MFC commands after each SigNotify1 task
++     * start -- what a signal-driven worker fetches to learn its job. */
++    if (channel == MFC_Cmd && t_task_dma_left > 0) {
++        t_task_dma_left--;
++        static int s_n = 0;
++        if (s_n++ < 3000) {
++            const uint32_t c = value._u32[0] & 0xFF;
++            fprintf(stderr, "[task-dma] spu=0x%X pc=0x%05X cmd=0x%02X lsa=0x%05X ea=0x%08X size=%u",
++                    ctx->spu_id, (uint32_t)ctx->pc & SPU_LS_MASK, c,
++                    ctx->mfc_lsa & SPU_LS_MASK, ctx->mfc_eal, ctx->mfc_size);
++            /* List commands: EAL is the LS address of the element list and
++             * EAH the high EA word; show the first elements (size -> EA). */
++            if (c & 0x04) {
++                fprintf(stderr, " eah=0x%08X list:", ctx->mfc_eah);
++                for (uint32_t k = 0; k < 4 && k * 8 < ctx->mfc_size; k++) {
++                    const uint8_t* q = ctx->ls + ((ctx->mfc_eal + k * 8) & SPU_LS_MASK);
++                    fprintf(stderr, " [%u->0x%02X%02X%02X%02X]",
++                            (((uint32_t)q[2] << 8) | q[3]) & 0x7FFFu, q[4], q[5], q[6], q[7]);
++                }
++            }
++            fprintf(stderr, "\n");
++        }
++    }
      /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
       * worker that never issues an MFC command is either not being handed its
       * work descriptor or is waiting on a channel we never satisfy; the channel
-@@ -860,6 +953,7 @@
+@@ -860,6 +979,7 @@
          { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_MBOXTRACE") ? 1 : 0;
            if (s_t) fprintf(stderr, "[spu-mbox] INTR grp=0x%X spu=0x%X val=0x%08X\n",
                             ctx->spu_group_id, ctx->spu_id, v); }
@@ -1300,16 +1525,19 @@
          if (g_spu_user_event_hook && g_spu_user_event_hook(ctx, v)) break;
          spu_channel_write(&ctx->ch_out_intr_mbox, v);
          if (g_spu_out_mbox_hook) g_spu_out_mbox_hook(ctx->spu_group_id, ctx->spu_id, 1, v);
-@@ -1043,7 +1137,7 @@
+@@ -1043,7 +1163,10 @@
          if (ctx->rcv_evt_n > 0) { v = ctx->rcv_evt[ctx->rcv_evt_i++]; ctx->rcv_evt_n--; }
          else v = spu_channel_read(&ctx->ch_in_mbox);
          break;
 -    case SPU_RdSigNotify1:  v = spu_channel_read(&ctx->ch_sig_notify[0]); break;
-+    case SPU_RdSigNotify1:  v = spu_channel_read(&ctx->ch_sig_notify[0]); spu_taskcpu_begin(); break;
++    case SPU_RdSigNotify1:  v = spu_channel_read(&ctx->ch_sig_notify[0]); spu_taskcpu_begin();
++        { static int s_td = -1; if (s_td < 0) { const char* e = getenv("SPU_TASK_DMA"); s_td = e ? atoi(e) : 0; }
++          t_task_dma_left = s_td; }
++        break;
      case SPU_RdSigNotify2:  v = spu_channel_read(&ctx->ch_sig_notify[1]); break;
      /* The decrementer must actually DECREMENT. Returning the latched WrDec
       * value verbatim makes every `rdch $ch8` deadline poll spin forever: the
-@@ -1080,6 +1174,27 @@
+@@ -1080,6 +1203,27 @@
          break;
      }
      return spu_make_preferred_u32(v);
@@ -1337,7 +1565,7 @@
  }
  
  /* ===========================================================================
-@@ -1236,6 +1351,8 @@
+@@ -1236,6 +1380,8 @@
              extern void spu_halt(spu_context*);
              spu_halt(ctx);
          }
@@ -1346,6 +1574,36 @@
          return (uint32_t)ctx->rcv_evt_n + ctx->ch_in_mbox.count;           /* readable */
      /* Free slots, CLAMPED. The queue behind each channel is SPU_CHANNEL_CAP
       * deep -- deeper than the hardware depth reported here -- so `count` can
+@@ -2057,6 +2203,29 @@
+      * and falls into branch-to-0. All lifted funcs live below SPU_LS_SIZE, so
+      * masking is a no-op for already-valid targets. */
+     ctx->pc &= SPU_LS_MASK;
++    /* Title skip hook: an indirect CALL whose (image, target) the port marks
++     * as skippable returns at once (pc = link). Imabikisou decodes its movies
++     * natively and drops Sofdec's SPU picture decode this way, keeping the
++     * delegate's task protocol (dequeue, reply) intact. */
++    if (g_spu_ib_skip && g_spu_ib_skip(ctx, ctx->pc, ctx->gpr[0]._u32[0] & SPU_LS_MASK)) {
++        ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
++        if (ctx->host_depth == 0) { g_spu_trampoline_fn = spu_indirect_branch; }
++        return;
++    }
++    /* SPU_IB_LOG=1: targets of indirect calls with their link register, per
++     * image -- which function a dispatcher really calls. */
++    { static int il = -1;
++      if (il < 0) il = getenv("SPU_IB_LOG") ? 1 : 0;
++      if (il) { static struct { int img; uint32_t t, lr; unsigned long n; } h[256]; static int nh; static unsigned long tot;
++          const uint32_t lr = ctx->gpr[0]._u32[0] & SPU_LS_MASK; int f = -1;
++          for (int i = 0; i < nh; i++) if (h[i].img == ctx->image_id && h[i].t == ctx->pc && h[i].lr == lr) { f = i; break; }
++          if (f < 0 && nh < 256) { f = nh++; h[f].img = ctx->image_id; h[f].t = ctx->pc; h[f].lr = lr; h[f].n = 0; }
++          if (f >= 0) h[f].n++;
++          if ((++tot % 200000) == 0) {
++              fprintf(stderr, "[ib-log] after %lu indirect branches:\n", tot);
++              for (int i = 0; i < nh; i++) if (h[i].n > 5)
++                  fprintf(stderr, "   img=%d target=0x%05X lr=0x%05X n=%lu\n", h[i].img, h[i].t, h[i].lr, h[i].n);
++          } } }
+     /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
+      * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
+      * enforce the preserve-all-registers hardware contract here -- the first
 --- a/runtime/spu/spu_coherency.c
 +++ b/runtime/spu/spu_coherency.c
 @@ -33,22 +33,14 @@
@@ -1434,6 +1692,53 @@
  }
  
  /* ---------------------------------------------------------------------------
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -185,11 +185,44 @@
+                               " size=%u covers 0x%08X\n",
+                       (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size,
+                       (uint32_t)s_w); } }
++    /* SPU_PUT_RUNS=1: PUTs per SPU coalesced into contiguous runs, one line per
++     * run once it breaks (start, end, bytes, pc, time) -- which regions of a
++     * large destination a job actually filled. */
++    { static int s_pr = -1;
++      if (s_pr < 0) s_pr = getenv("SPU_PUT_RUNS") ? 1 : 0;
++      if (s_pr && (cmd & 0x20) && !(cmd & 0x40) && size >= 128) {
++          static SPU_THREAD_LOCAL uint32_t r_lo, r_hi, r_pc; static SPU_THREAD_LOCAL unsigned long long r_t;
++          const uint32_t e = (uint32_t)ea;
++          if (r_hi && e == r_hi) r_hi += size;
++          else {
++              if (r_hi && r_hi - r_lo >= 65536) {
++                  extern unsigned long long ps3_ms_now(void);
++                  fprintf(stderr, "[put-run] spu=0x%X 0x%08X-0x%08X %u bytes pc=0x%05X t=%llums\n",
++                          spu->spu_id, r_lo, r_hi, r_hi - r_lo, r_pc, r_t);
++              }
++              extern unsigned long long ps3_ms_now(void);
++              r_lo = e; r_hi = e + size; r_pc = (uint32_t)spu->pc & SPU_LS_MASK; r_t = ps3_ms_now();
++          }
++      } }
+     /* SPU_DMA_RANGE=<lo>-<hi> (hex EAs): log transfers touching [lo,hi), first
+      * 64 -- who reads or writes a buffer the RSX shares with the SPUs. */
+     { static uint32_t s_lo = 1, s_hi;
+       if (s_lo == 1) { const char* e = getenv("SPU_DMA_RANGE"); s_lo = 0;
+           if (e) { char* d; s_lo = (uint32_t)strtoul(e, &d, 16); if (*d == '-') s_hi = (uint32_t)strtoul(d + 1, 0, 16); } }
++      /* SPU_DMA_FOLLOW=<n>: after a GET from the range, also log the next n
++       * transfers of that SPU wherever they go -- where data read from a
++       * buffer is written to. */
++      { static int s_fw = -1; static SPU_THREAD_LOCAL int t_follow;
++        if (s_fw < 0) { const char* e = getenv("SPU_DMA_FOLLOW"); s_fw = e ? atoi(e) : 0; }
++        if (s_fw && t_follow > 0 && !((uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo)) {
++            t_follow--;
++            static int _fn = 0;
++            if (_fn++ < 400)
++                fprintf(stderr, "[dma-follow] spu=0x%X pc=0x%05X cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
++                        spu->spu_id, (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size);
++        }
++        if (s_fw && s_hi && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo && (cmd & 0x40))
++            t_follow = s_fw; }
+       if (s_hi && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo) {
+           static int _n = 0;
+           if (_n++ < 64)
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -186,18 +186,23 @@

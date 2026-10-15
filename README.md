@@ -47,10 +47,10 @@ Actual captures from the native PC prototype, showing the **English machine-tran
 | Workstream | Estimate | Current evidence | Still to do |
 |---|---:|---|---|
 | Boot & runtime | 90% | Startup, system callbacks, fonts and initial loading run | Regression tests and less common system paths |
-| Graphics & pacing | 65% | Opening and classroom render; about 57–60 presentations/s in sampled scenes | Wider effects coverage, unique-frame pacing, scene regressions |
+| Graphics & pacing | 70% | Opening and classroom render at ~60 presentations/s; NV0039 buffer copies implemented (fixes the purple/green panorama scenes) | Wider effects coverage, glyph cache edge artefacts, scene regressions |
 | Input & save/load | 65% | Keyboard/controller confirmation and early save/load exercised | Longer sessions, all menus and save-slot edge cases |
-| Audio | 35% | Audio plays; device output keeps its nominal rate | Crackling, upstream PCM interruptions and synchronization |
-| Movies | 35% | Opening movies decode and display | Remaining stutters, decode deadlines and A/V timing |
+| Audio | 55% | Mixer consumes guest blocks on a steady 5.33 ms clock (half-written blocks gone); SPU busy-waits removed | Occasional voice starvation, longer-session checks |
+| Movies | 70% | All movies (MPEG-1 1280x720) decoded natively on the PC and handed to Sofdec; logo jingle in sync, decode tasks ~0.3 ms instead of ~50 ms | Alpha/effect movies and seamless loops across many scenes still to be checked |
 | Full-game validation | 10% | Opening and first classroom tested | Branches, routes, endings, long-session stability |
 | English story coverage | 0.17% draft | 33 of 19,018 exported script entries; 27 UI labels separately | Machine translation, layout checks, context and terminology review |
 

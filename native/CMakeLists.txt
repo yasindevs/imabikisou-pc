@@ -159,6 +159,9 @@ endif()
 add_executable(${PROJECT_NAME}
     main.cpp
     font_bridge.cpp
+    ppu_hooks.cpp
+    movie_bridge.cpp
+    movie_native.c
     stubs.cpp
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
